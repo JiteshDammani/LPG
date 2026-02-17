@@ -114,7 +114,6 @@ export default function DeliveryScreen() {
         setReconciliationReasons([]);
         setShowReconciliation(true);
         setIsSubmitting(false);
-        bottomSheetRef.current?.expand();
       }
     } catch (error) {
       console.error('Error in handleSubmit:', error);
