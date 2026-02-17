@@ -45,7 +45,9 @@ export default function DeliveryScreen() {
   const cashCylinders = Math.max(0, delivered - online - paytm);
   const cashAmount = cashCylinders * cylinderPrice;
   const partial = parseFloat(partialDigital) || 0;
-  const totalPayable = cashAmount + partial;
+  const totalPayable = cashAmount - partial; // Subtract partial digital since it's already paid
+  const cashCollectedAmount = parseFloat(cashCollected) || 0;
+  const difference = cashCollectedAmount - totalPayable;
 
   const handleSubmit = async () => {
     // Validation
