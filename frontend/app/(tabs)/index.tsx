@@ -351,9 +351,22 @@ export default function DeliveryScreen() {
         </View>
 
         {/* Submit Button */}
-        <TouchableOpacity style={styles.submitButton} onPress={handleSubmit}>
-          <Ionicons name="checkmark-circle" size={24} color="#fff" />
-          <Text style={styles.submitButtonText}>Save Delivery Record</Text>
+        <TouchableOpacity 
+          style={[styles.submitButton, isSubmitting && styles.submitButtonDisabled]} 
+          onPress={handleSubmit}
+          disabled={isSubmitting}
+        >
+          {isSubmitting ? (
+            <>
+              <ActivityIndicator size="small" color="#fff" />
+              <Text style={styles.submitButtonText}>Saving...</Text>
+            </>
+          ) : (
+            <>
+              <Ionicons name="checkmark-circle" size={24} color="#fff" />
+              <Text style={styles.submitButtonText}>Save Delivery Record</Text>
+            </>
+          )}
         </TouchableOpacity>
       </ScrollView>
 
