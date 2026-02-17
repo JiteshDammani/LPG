@@ -134,34 +134,43 @@ export default function DeliveryScreen() {
   };
 
   const handleReconciliationComplete = async () => {
-    const delivered = parseInt(cylindersDelivered) || 0;
-    const empty = parseInt(emptyReceived) || 0;
-    const mismatch = Math.abs(delivered - empty);
+    try {
+      console.log('Reconciliation complete clicked');
+      const delivered = parseInt(cylindersDelivered) || 0;
+      const empty = parseInt(emptyReceived) || 0;
+      const mismatch = Math.abs(delivered - empty);
 
-    if (reconciliationReasons.length !== mismatch) {
-      Alert.alert('Error', `Please provide exactly ${mismatch} reconciliation reasons`);
-      return;
-    }
+      console.log('Mismatch:', mismatch, 'Reasons provided:', reconciliationReasons.length);
 
-    // Validate consumer names for NC, DBC, TV
-    for (const reason of reconciliationReasons) {
-      if (['NC', 'DBC', 'TV'].includes(reason.reason) && !reason.consumer_name) {
-        Alert.alert('Error', `Consumer name required for ${reason.reason}`);
+      if (reconciliationReasons.length !== mismatch) {
+        Alert.alert('Error', `Please provide exactly ${mismatch} reconciliation reasons`);
         return;
       }
+
+      // Validate consumer names for NC, DBC, TV
+      for (const reason of reconciliationReasons) {
+        if (['NC', 'DBC', 'TV'].includes(reason.reason) && !reason.consumer_name) {
+          Alert.alert('Error', `Consumer name required for ${reason.reason}`);
+          return;
+        }
+      }
+
+      const finalDelivery = {
+        ...pendingDelivery,
+        reconciliation_status: 'complete',
+        reconciliation_reasons,
+      };
+
+      console.log('Saving delivery with reconciliation:', finalDelivery);
+      await addDelivery(finalDelivery);
+      Alert.alert('Success', 'Delivery record saved with reconciliation');
+      resetForm();
+      setShowReconciliation(false);
+      bottomSheetRef.current?.close();
+    } catch (error) {
+      console.error('Error in handleReconciliationComplete:', error);
+      Alert.alert('Error', 'Failed to save delivery with reconciliation: ' + (error?.message || 'Unknown error'));
     }
-
-    const finalDelivery = {
-      ...pendingDelivery,
-      reconciliation_status: 'complete',
-      reconciliation_reasons,
-    };
-
-    await addDelivery(finalDelivery);
-    Alert.alert('Success', 'Delivery record saved with reconciliation');
-    resetForm();
-    setShowReconciliation(false);
-    bottomSheetRef.current?.close();
   };
 
   const addReconciliationReason = () => {
