@@ -614,6 +614,10 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 8,
   },
+  submitButtonDisabled: {
+    backgroundColor: '#95a5a6',
+    opacity: 0.7,
+  },
   submitButtonText: {
     color: '#fff',
     fontSize: 18,
