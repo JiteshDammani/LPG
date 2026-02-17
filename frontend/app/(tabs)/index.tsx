@@ -52,19 +52,28 @@ export default function DeliveryScreen() {
 
   const handleSubmit = async () => {
     try {
+      if (isSubmitting) {
+        console.log('Already submitting, please wait...');
+        return;
+      }
+      
       console.log('Submit clicked');
+      setIsSubmitting(true);
       
       // Validation
       if (!selectedEmployee) {
         Alert.alert('Error', 'Please select delivery staff');
+        setIsSubmitting(false);
         return;
       }
       if (delivered === 0) {
         Alert.alert('Error', 'Please enter cylinders delivered');
+        setIsSubmitting(false);
         return;
       }
       if (online + paytm > delivered) {
         Alert.alert('Error', 'Online + Paytm payments cannot exceed total cylinders delivered');
+        setIsSubmitting(false);
         return;
       }
 
@@ -92,21 +101,24 @@ export default function DeliveryScreen() {
 
       if (mismatch === 0) {
         // No mismatch, save directly
-        console.log('Saving delivery...');
+        console.log('Saving delivery (no reconciliation needed)...');
         await addDelivery(deliveryData);
         Alert.alert('Success', 'Delivery record saved successfully');
         resetForm();
+        setIsSubmitting(false);
       } else {
         // Show reconciliation
-        console.log('Showing reconciliation modal');
+        console.log('Showing reconciliation modal - mismatch detected');
         setPendingDelivery(deliveryData);
         setReconciliationReasons([]);
         setShowReconciliation(true);
+        setIsSubmitting(false);
         bottomSheetRef.current?.expand();
       }
     } catch (error) {
       console.error('Error in handleSubmit:', error);
-      Alert.alert('Error', 'Failed to save delivery: ' + error.message);
+      Alert.alert('Error', 'Failed to save delivery: ' + (error?.message || 'Unknown error'));
+      setIsSubmitting(false);
     }
   };
 
