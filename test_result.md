@@ -243,10 +243,12 @@ metadata:
 
 test_plan:
   current_focus:
-    - "Settings API - Get and update cylinder price"
-    - "Employee Management API"
-    - "Delivery Management API"
-    - "Daily Summary API"
+    - "Zustand Store with offline-first AsyncStorage"
+    - "Delivery Entry Screen with Reconciliation"
+    - "Daily Records Screen with Calendar and Export"
+    - "Staff Management Screen"
+    - "Settings Screen with Price Management"
+    - "Tab Navigation with BPCL Branding"
   stuck_tasks: []
   test_all: true
   test_priority: "high_first"
