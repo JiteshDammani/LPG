@@ -29,6 +29,7 @@ export default function DeliveryScreen() {
   const [paytmPayments, setPatmPayments] = useState('');
   const [partialDigital, setPartialDigital] = useState('');
   const [cashCollected, setCashCollected] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Reconciliation state
   const [showReconciliation, setShowReconciliation] = useState(false);
