@@ -50,50 +50,62 @@ export default function DeliveryScreen() {
   const difference = cashCollectedAmount - totalPayable;
 
   const handleSubmit = async () => {
-    // Validation
-    if (!selectedEmployee) {
-      Alert.alert('Error', 'Please select delivery staff');
-      return;
-    }
-    if (delivered === 0) {
-      Alert.alert('Error', 'Please enter cylinders delivered');
-      return;
-    }
-    if (online + paytm > delivered) {
-      Alert.alert('Error', 'Online + Paytm payments cannot exceed total cylinders delivered');
-      return;
-    }
+    try {
+      console.log('Submit clicked');
+      
+      // Validation
+      if (!selectedEmployee) {
+        Alert.alert('Error', 'Please select delivery staff');
+        return;
+      }
+      if (delivered === 0) {
+        Alert.alert('Error', 'Please enter cylinders delivered');
+        return;
+      }
+      if (online + paytm > delivered) {
+        Alert.alert('Error', 'Online + Paytm payments cannot exceed total cylinders delivered');
+        return;
+      }
 
-    const empty = parseInt(emptyReceived) || 0;
-    const mismatch = delivered - empty;
+      const empty = parseInt(emptyReceived) || 0;
+      const mismatch = delivered - empty;
 
-    const deliveryData = {
-      date: format(new Date(), 'yyyy-MM-dd'),
-      employee_name: selectedEmployee,
-      cylinders_delivered: delivered,
-      empty_received: empty,
-      online_payments: online,
-      paytm_payments: paytm,
-      partial_digital_amount: partial,
-      cash_collected: parseFloat(cashCollected) || 0,
-      calculated_cash_cylinders: cashCylinders,
-      calculated_cash_amount: cashAmount,
-      calculated_total_payable: totalPayable,
-      reconciliation_status: mismatch === 0 ? 'complete' : 'pending',
-      reconciliation_reasons: [],
-    };
+      const deliveryData = {
+        date: format(new Date(), 'yyyy-MM-dd'),
+        employee_name: selectedEmployee,
+        cylinders_delivered: delivered,
+        empty_received: empty,
+        online_payments: online,
+        paytm_payments: paytm,
+        partial_digital_amount: partial,
+        cash_collected: parseFloat(cashCollected) || 0,
+        calculated_cash_cylinders: cashCylinders,
+        calculated_cash_amount: cashAmount,
+        calculated_total_payable: totalPayable,
+        reconciliation_status: mismatch === 0 ? 'complete' : 'pending',
+        reconciliation_reasons: [],
+      };
 
-    if (mismatch === 0) {
-      // No mismatch, save directly
-      await addDelivery(deliveryData);
-      Alert.alert('Success', 'Delivery record saved successfully');
-      resetForm();
-    } else {
-      // Show reconciliation
-      setPendingDelivery(deliveryData);
-      setReconciliationReasons([]);
-      setShowReconciliation(true);
-      bottomSheetRef.current?.expand();
+      console.log('Delivery data:', deliveryData);
+      console.log('Mismatch:', mismatch);
+
+      if (mismatch === 0) {
+        // No mismatch, save directly
+        console.log('Saving delivery...');
+        await addDelivery(deliveryData);
+        Alert.alert('Success', 'Delivery record saved successfully');
+        resetForm();
+      } else {
+        // Show reconciliation
+        console.log('Showing reconciliation modal');
+        setPendingDelivery(deliveryData);
+        setReconciliationReasons([]);
+        setShowReconciliation(true);
+        bottomSheetRef.current?.expand();
+      }
+    } catch (error) {
+      console.error('Error in handleSubmit:', error);
+      Alert.alert('Error', 'Failed to save delivery: ' + error.message);
     }
   };
 
