@@ -241,21 +241,29 @@ export const useDataStore = create<DataStore>((set, get) => ({
 
   addDelivery: async (delivery: Omit<Delivery, 'id' | 'created_at'>) => {
     try {
+      console.log('addDelivery called with:', delivery);
       const response = await fetch(`${BACKEND_URL}/api/deliveries`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(delivery),
       });
 
+      console.log('API response status:', response.status);
+      
       if (response.ok) {
+        const result = await response.json();
+        console.log('Delivery created successfully:', result);
         await get().loadDeliveriesByDate(delivery.date);
       } else {
+        const errorText = await response.text();
+        console.error('API error response:', errorText);
         // Save to local storage
         const newDelivery: Delivery = {
           ...delivery,
           id: Date.now().toString(),
           created_at: new Date().toISOString(),
         };
+        console.log('Saving to local storage:', newDelivery);
         const localKey = `deliveries_${delivery.date}`;
         const existing = await AsyncStorage.getItem(localKey);
         const deliveries = existing ? JSON.parse(existing) : [];
@@ -265,6 +273,7 @@ export const useDataStore = create<DataStore>((set, get) => ({
       }
     } catch (error) {
       console.error('Error adding delivery:', error);
+      throw error;
     }
   },
 
