@@ -384,7 +384,7 @@ export default function DeliveryScreen() {
       {showReconciliation && (
         <BottomSheet
           ref={bottomSheetRef}
-          index={-1}
+          index={0}
           snapPoints={snapPoints}
           enablePanDownToClose={false}
           backgroundStyle={styles.bottomSheet}
