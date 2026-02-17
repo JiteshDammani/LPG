@@ -544,6 +544,27 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: BPCL_BLUE,
   },
+  divider: {
+    height: 1,
+    backgroundColor: '#ddd',
+    marginVertical: 12,
+  },
+  calcValuePositive: {
+    color: '#e74c3c',
+  },
+  calcValueNegative: {
+    color: '#e67e22',
+  },
+  calcValueNeutral: {
+    color: '#27ae60',
+  },
+  differenceNote: {
+    fontSize: 12,
+    color: '#e67e22',
+    textAlign: 'center',
+    marginTop: 8,
+    fontWeight: '600',
+  },
   submitButton: {
     backgroundColor: BPCL_BLUE,
     margin: 16,
