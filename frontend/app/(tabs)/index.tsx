@@ -291,9 +291,38 @@ export default function DeliveryScreen() {
             <Text style={styles.calcValue}>₹{cashAmount.toFixed(2)}</Text>
           </View>
           <View style={styles.calcRow}>
-            <Text style={styles.calcLabel}>Total Payable:</Text>
+            <Text style={styles.calcLabel}>Less: Partial Digital:</Text>
+            <Text style={styles.calcValue}>₹{partial.toFixed(2)}</Text>
+          </View>
+          <View style={styles.calcRow}>
+            <Text style={styles.calcLabel}>Expected Cash to Collect:</Text>
             <Text style={styles.calcValueLarge}>₹{totalPayable.toFixed(2)}</Text>
           </View>
+          
+          {cashCollectedAmount > 0 && (
+            <>
+              <View style={styles.divider} />
+              <View style={styles.calcRow}>
+                <Text style={styles.calcLabel}>Actual Cash Collected:</Text>
+                <Text style={styles.calcValue}>₹{cashCollectedAmount.toFixed(2)}</Text>
+              </View>
+              <View style={styles.calcRow}>
+                <Text style={styles.calcLabel}>Difference:</Text>
+                <Text style={[
+                  styles.calcValueLarge,
+                  difference > 0 ? styles.calcValuePositive : 
+                  difference < 0 ? styles.calcValueNegative : styles.calcValueNeutral
+                ]}>
+                  {difference >= 0 ? '+' : ''}₹{difference.toFixed(2)}
+                </Text>
+              </View>
+              {difference !== 0 && (
+                <Text style={styles.differenceNote}>
+                  {difference > 0 ? '⚠️ Extra cash collected' : '⚠️ Short cash collected'}
+                </Text>
+              )}
+            </>
+          )}
         </View>
 
         {/* Submit Button */}
