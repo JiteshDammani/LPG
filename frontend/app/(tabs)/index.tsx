@@ -157,7 +157,7 @@ export default function DeliveryScreen() {
       const finalDelivery = {
         ...pendingDelivery,
         reconciliation_status: 'complete',
-        reconciliation_reasons,
+        reconciliation_reasons: reconciliationReasons,
       };
 
       console.log('Saving delivery with reconciliation:', finalDelivery);
