@@ -1,5 +1,4 @@
-Here's the **fixed version** that works **100% offline with local storage only**:
-Action: file_editor create /app/temp_lpg/frontend/store/dataStore.ts --file-text "import { create } from 'zustand';
+import { create } from 'zustand';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export interface ReconciliationReason {
@@ -40,30 +39,22 @@ export interface Settings {
 }
 
 interface DataStore {
-  // Settings
   cylinderPrice: number;
   settings: Settings | null;
   loadSettings: () => Promise<void>;
   updateCylinderPrice: (price: number) => Promise<void>;
-
-  // Employees
   employees: Employee[];
   loadEmployees: () => Promise<void>;
   addEmployee: (name: string) => Promise<void>;
   deleteEmployee: (id: string) => Promise<void>;
-
-  // Deliveries
   deliveries: Delivery[];
   loadDeliveriesByDate: (date: string) => Promise<void>;
   addDelivery: (delivery: Omit<Delivery, 'id' | 'created_at'>) => Promise<void>;
   updateDelivery: (id: string, delivery: Partial<Delivery>) => Promise<void>;
-
-  // Daily Summary
   dailySummary: any;
   loadDailySummary: (date: string) => Promise<void>;
 }
 
-// Storage keys
 const STORAGE_KEYS = {
   SETTINGS: 'lpg_settings',
   EMPLOYEES: 'lpg_employees',
@@ -71,14 +62,12 @@ const STORAGE_KEYS = {
 };
 
 export const useDataStore = create<DataStore>((set, get) => ({
-  // Initial state
   cylinderPrice: 877.5,
   settings: null,
   employees: [],
   deliveries: [],
   dailySummary: null,
 
-  // Settings actions - LOCAL STORAGE ONLY
   loadSettings: async () => {
     try {
       const localSettings = await AsyncStorage.getItem(STORAGE_KEYS.SETTINGS);
@@ -86,7 +75,6 @@ export const useDataStore = create<DataStore>((set, get) => ({
         const data = JSON.parse(localSettings);
         set({ settings: data, cylinderPrice: data.cylinder_price });
       } else {
-        // Create default settings
         const defaultSettings: Settings = {
           cylinder_price: 877.5,
           price_history: [{ date: new Date().toISOString(), price: 877.5 }],
@@ -97,7 +85,6 @@ export const useDataStore = create<DataStore>((set, get) => ({
       }
     } catch (error) {
       console.error('Error loading settings:', error);
-      // Set defaults on error
       set({ cylinderPrice: 877.5 });
     }
   },
@@ -112,10 +99,7 @@ export const useDataStore = create<DataStore>((set, get) => ({
       const updatedSettings: Settings = {
         ...currentSettings,
         cylinder_price: price,
-        price_history: [
-          ...currentSettings.price_history,
-          { date: new Date().toISOString(), price },
-        ],
+        price_history: [...currentSettings.price_history, { date: new Date().toISOString(), price }],
         updated_at: new Date().toISOString(),
       };
       set({ settings: updatedSettings, cylinderPrice: price });
@@ -125,13 +109,11 @@ export const useDataStore = create<DataStore>((set, get) => ({
     }
   },
 
-  // Employee actions - LOCAL STORAGE ONLY
   loadEmployees: async () => {
     try {
       const localEmployees = await AsyncStorage.getItem(STORAGE_KEYS.EMPLOYEES);
       if (localEmployees) {
         const employees = JSON.parse(localEmployees);
-        // Filter only active employees
         set({ employees: employees.filter((emp: Employee) => emp.active) });
       } else {
         set({ employees: [] });
@@ -161,11 +143,9 @@ export const useDataStore = create<DataStore>((set, get) => ({
 
   deleteEmployee: async (id: string) => {
     try {
-      // Soft delete - mark as inactive
       const updatedEmployees = get().employees.map((emp) =>
         emp.id === id ? { ...emp, active: false } : emp
       );
-      // Only show active employees in state
       set({ employees: updatedEmployees.filter((emp) => emp.active) });
       await AsyncStorage.setItem(STORAGE_KEYS.EMPLOYEES, JSON.stringify(updatedEmployees));
     } catch (error) {
@@ -174,7 +154,6 @@ export const useDataStore = create<DataStore>((set, get) => ({
     }
   },
 
-  // Delivery actions - LOCAL STORAGE ONLY
   loadDeliveriesByDate: async (date: string) => {
     try {
       const localKey = `${STORAGE_KEYS.DELIVERIES_PREFIX}${date}`;
@@ -213,7 +192,6 @@ export const useDataStore = create<DataStore>((set, get) => ({
     try {
       const currentDelivery = get().deliveries.find((d) => d.id === id);
       if (!currentDelivery) return;
-
       const localKey = `${STORAGE_KEYS.DELIVERIES_PREFIX}${currentDelivery.date}`;
       const existing = await AsyncStorage.getItem(localKey);
       if (existing) {
@@ -230,12 +208,10 @@ export const useDataStore = create<DataStore>((set, get) => ({
     }
   },
 
-  // Daily summary - CALCULATED FROM LOCAL DATA
   loadDailySummary: async (date: string) => {
     try {
       const localKey = `${STORAGE_KEYS.DELIVERIES_PREFIX}${date}`;
       const localDeliveries = await AsyncStorage.getItem(localKey);
-      
       if (!localDeliveries) {
         set({
           dailySummary: {
@@ -249,7 +225,6 @@ export const useDataStore = create<DataStore>((set, get) => ({
         });
         return;
       }
-
       const deliveries: Delivery[] = JSON.parse(localDeliveries);
       const summary = {
         total_cylinders_delivered: deliveries.reduce((sum, d) => sum + d.cylinders_delivered, 0),
@@ -266,5 +241,3 @@ export const useDataStore = create<DataStore>((set, get) => ({
     }
   },
 }));
-"
-Observation: Overwrite successful: /app/temp_lpg/frontend/store/dataStore.ts
