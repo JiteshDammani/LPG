@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -17,9 +17,15 @@ const BPCL_BLUE = '#017DC5';
 const BPCL_YELLOW = '#FFDC02';
 
 export default function StaffScreen() {
-  const { employees, addEmployee, deleteEmployee } = useDataStore();
+  // Added loadEmployees to the destructuring
+  const { employees, addEmployee, deleteEmployee, loadEmployees } = useDataStore();
   const [newEmployeeName, setNewEmployeeName] = useState('');
   const [isAdding, setIsAdding] = useState(false);
+
+  // CRITICAL FIX: Load employees from local storage when the screen mounts
+  useEffect(() => {
+    loadEmployees();
+  }, []);
 
   const handleAddEmployee = async () => {
     if (!newEmployeeName.trim()) {
@@ -27,10 +33,14 @@ export default function StaffScreen() {
       return;
     }
 
-    await addEmployee(newEmployeeName.trim());
-    setNewEmployeeName('');
-    setIsAdding(false);
-    Alert.alert('Success', 'Employee added successfully');
+    try {
+      await addEmployee(newEmployeeName.trim());
+      setNewEmployeeName('');
+      setIsAdding(false);
+      Alert.alert('Success', 'Employee added successfully');
+    } catch (error) {
+      Alert.alert('Error', 'Failed to save employee to device storage');
+    }
   };
 
   const handleDeleteEmployee = (id: string, name: string) => {
@@ -43,8 +53,12 @@ export default function StaffScreen() {
           text: 'Delete',
           style: 'destructive',
           onPress: async () => {
-            await deleteEmployee(id);
-            Alert.alert('Success', 'Employee removed successfully');
+            try {
+              await deleteEmployee(id);
+              Alert.alert('Success', 'Employee removed successfully');
+            } catch (error) {
+              Alert.alert('Error', 'Failed to delete employee');
+            }
           },
         },
       ]
