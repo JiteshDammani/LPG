@@ -112,12 +112,9 @@ export const useDataStore = create<DataStore>((set, get) => ({
   loadEmployees: async () => {
     try {
       const localEmployees = await AsyncStorage.getItem(STORAGE_KEYS.EMPLOYEES);
-      if (localEmployees) {
-        const employees = JSON.parse(localEmployees);
-        set({ employees: employees.filter((emp: Employee) => emp.active) });
-      } else {
-        set({ employees: [] });
-      }
+      const allEmployees: Employee[] = localEmployees ? JSON.parse(localEmployees) : [];
+      // Only show active employees in the UI state
+      set({ employees: allEmployees.filter((emp) => emp.active) });
     } catch (error) {
       console.error('Error loading employees:', error);
       set({ employees: [] });
@@ -126,15 +123,24 @@ export const useDataStore = create<DataStore>((set, get) => ({
 
   addEmployee: async (name: string) => {
     try {
+      // 1. Fetch current full list from storage to prevent overwriting
+      const localData = await AsyncStorage.getItem(STORAGE_KEYS.EMPLOYEES);
+      const fullList: Employee[] = localData ? JSON.parse(localData) : [];
+
       const newEmployee: Employee = {
         id: Date.now().toString(),
         name,
         active: true,
         created_at: new Date().toISOString(),
       };
-      const updatedEmployees = [...get().employees, newEmployee];
-      set({ employees: updatedEmployees });
-      await AsyncStorage.setItem(STORAGE_KEYS.EMPLOYEES, JSON.stringify(updatedEmployees));
+
+      const updatedFullList = [...fullList, newEmployee];
+
+      // 2. Persist the full master list
+      await AsyncStorage.setItem(STORAGE_KEYS.EMPLOYEES, JSON.stringify(updatedFullList));
+
+      // 3. Update state with only active members
+      set({ employees: updatedFullList.filter((emp) => emp.active) });
     } catch (error) {
       console.error('Error adding employee:', error);
       throw error;
@@ -143,11 +149,18 @@ export const useDataStore = create<DataStore>((set, get) => ({
 
   deleteEmployee: async (id: string) => {
     try {
-      const updatedEmployees = get().employees.map((emp) =>
+      const localData = await AsyncStorage.getItem(STORAGE_KEYS.EMPLOYEES);
+      const fullList: Employee[] = localData ? JSON.parse(localData) : [];
+
+      // Soft delete: Mark as inactive in the master list
+      const updatedFullList = fullList.map((emp) =>
         emp.id === id ? { ...emp, active: false } : emp
       );
-      set({ employees: updatedEmployees.filter((emp) => emp.active) });
-      await AsyncStorage.setItem(STORAGE_KEYS.EMPLOYEES, JSON.stringify(updatedEmployees));
+
+      await AsyncStorage.setItem(STORAGE_KEYS.EMPLOYEES, JSON.stringify(updatedFullList));
+      
+      // Update state to remove from UI
+      set({ employees: updatedFullList.filter((emp) => emp.active) });
     } catch (error) {
       console.error('Error deleting employee:', error);
       throw error;
@@ -158,11 +171,7 @@ export const useDataStore = create<DataStore>((set, get) => ({
     try {
       const localKey = `${STORAGE_KEYS.DELIVERIES_PREFIX}${date}`;
       const localDeliveries = await AsyncStorage.getItem(localKey);
-      if (localDeliveries) {
-        set({ deliveries: JSON.parse(localDeliveries) });
-      } else {
-        set({ deliveries: [] });
-      }
+      set({ deliveries: localDeliveries ? JSON.parse(localDeliveries) : [] });
     } catch (error) {
       console.error('Error loading deliveries:', error);
       set({ deliveries: [] });
@@ -171,17 +180,19 @@ export const useDataStore = create<DataStore>((set, get) => ({
 
   addDelivery: async (delivery: Omit<Delivery, 'id' | 'created_at'>) => {
     try {
+      const localKey = `${STORAGE_KEYS.DELIVERIES_PREFIX}${delivery.date}`;
+      const existing = await AsyncStorage.getItem(localKey);
+      const deliveries: Delivery[] = existing ? JSON.parse(existing) : [];
+
       const newDelivery: Delivery = {
         ...delivery,
         id: Date.now().toString(),
         created_at: new Date().toISOString(),
       };
-      const localKey = `${STORAGE_KEYS.DELIVERIES_PREFIX}${delivery.date}`;
-      const existing = await AsyncStorage.getItem(localKey);
-      const deliveries = existing ? JSON.parse(existing) : [];
-      deliveries.push(newDelivery);
-      await AsyncStorage.setItem(localKey, JSON.stringify(deliveries));
-      set({ deliveries });
+
+      const updatedDeliveries = [...deliveries, newDelivery];
+      await AsyncStorage.setItem(localKey, JSON.stringify(updatedDeliveries));
+      set({ deliveries: updatedDeliveries });
     } catch (error) {
       console.error('Error adding delivery:', error);
       throw error;
@@ -190,10 +201,13 @@ export const useDataStore = create<DataStore>((set, get) => ({
 
   updateDelivery: async (id: string, deliveryUpdate: Partial<Delivery>) => {
     try {
-      const currentDelivery = get().deliveries.find((d) => d.id === id);
-      if (!currentDelivery) return;
-      const localKey = `${STORAGE_KEYS.DELIVERIES_PREFIX}${currentDelivery.date}`;
+      const currentDeliveries = get().deliveries;
+      const target = currentDeliveries.find((d) => d.id === id);
+      if (!target) return;
+
+      const localKey = `${STORAGE_KEYS.DELIVERIES_PREFIX}${target.date}`;
       const existing = await AsyncStorage.getItem(localKey);
+      
       if (existing) {
         const deliveries: Delivery[] = JSON.parse(existing);
         const updatedDeliveries = deliveries.map((d) =>
@@ -212,6 +226,7 @@ export const useDataStore = create<DataStore>((set, get) => ({
     try {
       const localKey = `${STORAGE_KEYS.DELIVERIES_PREFIX}${date}`;
       const localDeliveries = await AsyncStorage.getItem(localKey);
+      
       if (!localDeliveries) {
         set({
           dailySummary: {
@@ -225,16 +240,18 @@ export const useDataStore = create<DataStore>((set, get) => ({
         });
         return;
       }
+
       const deliveries: Delivery[] = JSON.parse(localDeliveries);
-      const summary = {
-        total_cylinders_delivered: deliveries.reduce((sum, d) => sum + d.cylinders_delivered, 0),
-        total_empty_received: deliveries.reduce((sum, d) => sum + d.empty_received, 0),
-        total_online_payments: deliveries.reduce((sum, d) => sum + d.online_payments, 0),
-        total_paytm_payments: deliveries.reduce((sum, d) => sum + d.paytm_payments, 0),
-        total_partial_digital: deliveries.reduce((sum, d) => sum + d.partial_digital_amount, 0),
-        total_cash_collected: deliveries.reduce((sum, d) => sum + d.cash_collected, 0),
-      };
-      set({ dailySummary: summary });
+      set({
+        dailySummary: {
+          total_cylinders_delivered: deliveries.reduce((sum, d) => sum + d.cylinders_delivered, 0),
+          total_empty_received: deliveries.reduce((sum, d) => sum + d.empty_received, 0),
+          total_online_payments: deliveries.reduce((sum, d) => sum + d.online_payments, 0),
+          total_paytm_payments: deliveries.reduce((sum, d) => sum + d.paytm_payments, 0),
+          total_partial_digital: deliveries.reduce((sum, d) => sum + d.partial_digital_amount, 0),
+          total_cash_collected: deliveries.reduce((sum, d) => sum + d.cash_collected, 0),
+        },
+      });
     } catch (error) {
       console.error('Error loading summary:', error);
       set({ dailySummary: null });
