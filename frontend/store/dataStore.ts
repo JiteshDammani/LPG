@@ -68,6 +68,7 @@ export const useDataStore = create<DataStore>((set, get) => ({
   deliveries: [],
   dailySummary: null,
 
+  // ============= SETTINGS =============
   loadSettings: async () => {
     try {
       const localSettings = await AsyncStorage.getItem(STORAGE_KEYS.SETTINGS);
@@ -109,10 +110,11 @@ export const useDataStore = create<DataStore>((set, get) => ({
     }
   },
 
+  // ============= EMPLOYEES (Fixed for APK) =============
   loadEmployees: async () => {
     try {
-      const localEmployees = await AsyncStorage.getItem(STORAGE_KEYS.EMPLOYEES);
-      const allEmployees: Employee[] = localEmployees ? JSON.parse(localEmployees) : [];
+      const localData = await AsyncStorage.getItem(STORAGE_KEYS.EMPLOYEES);
+      const allEmployees: Employee[] = localData ? JSON.parse(localData) : [];
       // Only show active employees in the UI state
       set({ employees: allEmployees.filter((emp) => emp.active) });
     } catch (error) {
@@ -123,7 +125,7 @@ export const useDataStore = create<DataStore>((set, get) => ({
 
   addEmployee: async (name: string) => {
     try {
-      // 1. Fetch current full list from storage to prevent overwriting
+      // 1. Get current FULL list from storage (disk) to prevent overwriting
       const localData = await AsyncStorage.getItem(STORAGE_KEYS.EMPLOYEES);
       const fullList: Employee[] = localData ? JSON.parse(localData) : [];
 
@@ -136,10 +138,10 @@ export const useDataStore = create<DataStore>((set, get) => ({
 
       const updatedFullList = [...fullList, newEmployee];
 
-      // 2. Persist the full master list
+      // 2. Persist the full master list to disk
       await AsyncStorage.setItem(STORAGE_KEYS.EMPLOYEES, JSON.stringify(updatedFullList));
 
-      // 3. Update state with only active members
+      // 3. Update state with only active members for the UI
       set({ employees: updatedFullList.filter((emp) => emp.active) });
     } catch (error) {
       console.error('Error adding employee:', error);
@@ -159,7 +161,7 @@ export const useDataStore = create<DataStore>((set, get) => ({
 
       await AsyncStorage.setItem(STORAGE_KEYS.EMPLOYEES, JSON.stringify(updatedFullList));
       
-      // Update state to remove from UI
+      // Update UI state
       set({ employees: updatedFullList.filter((emp) => emp.active) });
     } catch (error) {
       console.error('Error deleting employee:', error);
@@ -167,6 +169,7 @@ export const useDataStore = create<DataStore>((set, get) => ({
     }
   },
 
+  // ============= DELIVERIES =============
   loadDeliveriesByDate: async (date: string) => {
     try {
       const localKey = `${STORAGE_KEYS.DELIVERIES_PREFIX}${date}`;
@@ -201,6 +204,7 @@ export const useDataStore = create<DataStore>((set, get) => ({
 
   updateDelivery: async (id: string, deliveryUpdate: Partial<Delivery>) => {
     try {
+      // Find the date of the delivery we want to update
       const currentDeliveries = get().deliveries;
       const target = currentDeliveries.find((d) => d.id === id);
       if (!target) return;
