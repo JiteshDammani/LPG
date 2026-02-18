@@ -1,4 +1,5 @@
-import { create } from 'zustand';
+Here's the **fixed version** that works **100% offline with local storage only**:
+Action: file_editor create /app/temp_lpg/frontend/store/dataStore.ts --file-text "import { create } from 'zustand';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export interface ReconciliationReason {
@@ -62,7 +63,12 @@ interface DataStore {
   loadDailySummary: (date: string) => Promise<void>;
 }
 
-const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL || '';
+// Storage keys
+const STORAGE_KEYS = {
+  SETTINGS: 'lpg_settings',
+  EMPLOYEES: 'lpg_employees',
+  DELIVERIES_PREFIX: 'lpg_deliveries_',
+};
 
 export const useDataStore = create<DataStore>((set, get) => ({
   // Initial state
@@ -72,240 +78,193 @@ export const useDataStore = create<DataStore>((set, get) => ({
   deliveries: [],
   dailySummary: null,
 
-  // Settings actions
+  // Settings actions - LOCAL STORAGE ONLY
   loadSettings: async () => {
     try {
-      // Try backend first
-      const response = await fetch(`${BACKEND_URL}/api/settings`);
-      if (response.ok) {
-        const data = await response.json();
-        set({ settings: data, cylinderPrice: data.cylinder_price });
-        await AsyncStorage.setItem('settings', JSON.stringify(data));
-      } else {
-        // Fallback to local storage
-        const localSettings = await AsyncStorage.getItem('settings');
-        if (localSettings) {
-          const data = JSON.parse(localSettings);
-          set({ settings: data, cylinderPrice: data.cylinder_price });
-        }
-      }
-    } catch (error) {
-      console.error('Error loading settings:', error);
-      // Load from local storage
-      const localSettings = await AsyncStorage.getItem('settings');
+      const localSettings = await AsyncStorage.getItem(STORAGE_KEYS.SETTINGS);
       if (localSettings) {
         const data = JSON.parse(localSettings);
         set({ settings: data, cylinderPrice: data.cylinder_price });
       } else {
-        // Default settings
+        // Create default settings
         const defaultSettings: Settings = {
           cylinder_price: 877.5,
           price_history: [{ date: new Date().toISOString(), price: 877.5 }],
           updated_at: new Date().toISOString(),
         };
         set({ settings: defaultSettings, cylinderPrice: 877.5 });
-        await AsyncStorage.setItem('settings', JSON.stringify(defaultSettings));
+        await AsyncStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(defaultSettings));
       }
+    } catch (error) {
+      console.error('Error loading settings:', error);
+      // Set defaults on error
+      set({ cylinderPrice: 877.5 });
     }
   },
 
   updateCylinderPrice: async (price: number) => {
     try {
-      const response = await fetch(`${BACKEND_URL}/api/settings`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cylinder_price: price }),
-      });
-
-      if (response.ok) {
-        await get().loadSettings();
-      } else {
-        // Update local storage
-        const currentSettings = get().settings || {
-          cylinder_price: price,
-          price_history: [],
-          updated_at: new Date().toISOString(),
-        };
-        const updatedSettings = {
-          ...currentSettings,
-          cylinder_price: price,
-          price_history: [
-            ...currentSettings.price_history,
-            { date: new Date().toISOString(), price },
-          ],
-          updated_at: new Date().toISOString(),
-        };
-        set({ settings: updatedSettings, cylinderPrice: price });
-        await AsyncStorage.setItem('settings', JSON.stringify(updatedSettings));
-      }
+      const currentSettings = get().settings || {
+        cylinder_price: price,
+        price_history: [],
+        updated_at: new Date().toISOString(),
+      };
+      const updatedSettings: Settings = {
+        ...currentSettings,
+        cylinder_price: price,
+        price_history: [
+          ...currentSettings.price_history,
+          { date: new Date().toISOString(), price },
+        ],
+        updated_at: new Date().toISOString(),
+      };
+      set({ settings: updatedSettings, cylinderPrice: price });
+      await AsyncStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(updatedSettings));
     } catch (error) {
       console.error('Error updating price:', error);
     }
   },
 
-  // Employee actions
+  // Employee actions - LOCAL STORAGE ONLY
   loadEmployees: async () => {
     try {
-      const response = await fetch(`${BACKEND_URL}/api/employees`);
-      if (response.ok) {
-        const data = await response.json();
-        set({ employees: data });
-        await AsyncStorage.setItem('employees', JSON.stringify(data));
+      const localEmployees = await AsyncStorage.getItem(STORAGE_KEYS.EMPLOYEES);
+      if (localEmployees) {
+        const employees = JSON.parse(localEmployees);
+        // Filter only active employees
+        set({ employees: employees.filter((emp: Employee) => emp.active) });
       } else {
-        const localEmployees = await AsyncStorage.getItem('employees');
-        if (localEmployees) {
-          set({ employees: JSON.parse(localEmployees) });
-        }
+        set({ employees: [] });
       }
     } catch (error) {
       console.error('Error loading employees:', error);
-      const localEmployees = await AsyncStorage.getItem('employees');
-      if (localEmployees) {
-        set({ employees: JSON.parse(localEmployees) });
-      }
+      set({ employees: [] });
     }
   },
 
   addEmployee: async (name: string) => {
     try {
-      const response = await fetch(`${BACKEND_URL}/api/employees`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name }),
-      });
-
-      if (response.ok) {
-        await get().loadEmployees();
-      } else {
-        // Add to local storage
-        const newEmployee: Employee = {
-          id: Date.now().toString(),
-          name,
-          active: true,
-          created_at: new Date().toISOString(),
-        };
-        const updatedEmployees = [...get().employees, newEmployee];
-        set({ employees: updatedEmployees });
-        await AsyncStorage.setItem('employees', JSON.stringify(updatedEmployees));
-      }
+      const newEmployee: Employee = {
+        id: Date.now().toString(),
+        name,
+        active: true,
+        created_at: new Date().toISOString(),
+      };
+      const updatedEmployees = [...get().employees, newEmployee];
+      set({ employees: updatedEmployees });
+      await AsyncStorage.setItem(STORAGE_KEYS.EMPLOYEES, JSON.stringify(updatedEmployees));
     } catch (error) {
       console.error('Error adding employee:', error);
+      throw error;
     }
   },
 
   deleteEmployee: async (id: string) => {
     try {
-      const response = await fetch(`${BACKEND_URL}/api/employees/${id}`, {
-        method: 'DELETE',
-      });
-
-      if (response.ok) {
-        await get().loadEmployees();
-      } else {
-        const updatedEmployees = get().employees.filter((emp) => emp.id !== id);
-        set({ employees: updatedEmployees });
-        await AsyncStorage.setItem('employees', JSON.stringify(updatedEmployees));
-      }
+      // Soft delete - mark as inactive
+      const updatedEmployees = get().employees.map((emp) =>
+        emp.id === id ? { ...emp, active: false } : emp
+      );
+      // Only show active employees in state
+      set({ employees: updatedEmployees.filter((emp) => emp.active) });
+      await AsyncStorage.setItem(STORAGE_KEYS.EMPLOYEES, JSON.stringify(updatedEmployees));
     } catch (error) {
       console.error('Error deleting employee:', error);
+      throw error;
     }
   },
 
-  // Delivery actions
+  // Delivery actions - LOCAL STORAGE ONLY
   loadDeliveriesByDate: async (date: string) => {
     try {
-      const response = await fetch(`${BACKEND_URL}/api/deliveries/date/${date}`);
-      if (response.ok) {
-        const data = await response.json();
-        set({ deliveries: data });
-      } else {
-        const localKey = `deliveries_${date}`;
-        const localDeliveries = await AsyncStorage.getItem(localKey);
-        if (localDeliveries) {
-          set({ deliveries: JSON.parse(localDeliveries) });
-        } else {
-          set({ deliveries: [] });
-        }
-      }
-    } catch (error) {
-      console.error('Error loading deliveries:', error);
-      const localKey = `deliveries_${date}`;
+      const localKey = `${STORAGE_KEYS.DELIVERIES_PREFIX}${date}`;
       const localDeliveries = await AsyncStorage.getItem(localKey);
       if (localDeliveries) {
         set({ deliveries: JSON.parse(localDeliveries) });
       } else {
         set({ deliveries: [] });
       }
+    } catch (error) {
+      console.error('Error loading deliveries:', error);
+      set({ deliveries: [] });
     }
   },
 
   addDelivery: async (delivery: Omit<Delivery, 'id' | 'created_at'>) => {
     try {
-      console.log('addDelivery called with:', delivery);
-      const response = await fetch(`${BACKEND_URL}/api/deliveries`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(delivery),
-      });
-
-      console.log('API response status:', response.status);
-      
-      if (response.ok) {
-        const result = await response.json();
-        console.log('Delivery created successfully:', result);
-        await get().loadDeliveriesByDate(delivery.date);
-      } else {
-        const errorText = await response.text();
-        console.error('API error response:', errorText);
-        // Save to local storage
-        const newDelivery: Delivery = {
-          ...delivery,
-          id: Date.now().toString(),
-          created_at: new Date().toISOString(),
-        };
-        console.log('Saving to local storage:', newDelivery);
-        const localKey = `deliveries_${delivery.date}`;
-        const existing = await AsyncStorage.getItem(localKey);
-        const deliveries = existing ? JSON.parse(existing) : [];
-        deliveries.push(newDelivery);
-        await AsyncStorage.setItem(localKey, JSON.stringify(deliveries));
-        set({ deliveries });
-      }
+      const newDelivery: Delivery = {
+        ...delivery,
+        id: Date.now().toString(),
+        created_at: new Date().toISOString(),
+      };
+      const localKey = `${STORAGE_KEYS.DELIVERIES_PREFIX}${delivery.date}`;
+      const existing = await AsyncStorage.getItem(localKey);
+      const deliveries = existing ? JSON.parse(existing) : [];
+      deliveries.push(newDelivery);
+      await AsyncStorage.setItem(localKey, JSON.stringify(deliveries));
+      set({ deliveries });
     } catch (error) {
       console.error('Error adding delivery:', error);
       throw error;
     }
   },
 
-  updateDelivery: async (id: string, delivery: Partial<Delivery>) => {
+  updateDelivery: async (id: string, deliveryUpdate: Partial<Delivery>) => {
     try {
-      const response = await fetch(`${BACKEND_URL}/api/deliveries/${id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(delivery),
-      });
+      const currentDelivery = get().deliveries.find((d) => d.id === id);
+      if (!currentDelivery) return;
 
-      if (response.ok) {
-        const currentDelivery = get().deliveries.find((d) => d.id === id);
-        if (currentDelivery) {
-          await get().loadDeliveriesByDate(currentDelivery.date);
-        }
+      const localKey = `${STORAGE_KEYS.DELIVERIES_PREFIX}${currentDelivery.date}`;
+      const existing = await AsyncStorage.getItem(localKey);
+      if (existing) {
+        const deliveries: Delivery[] = JSON.parse(existing);
+        const updatedDeliveries = deliveries.map((d) =>
+          d.id === id ? { ...d, ...deliveryUpdate } : d
+        );
+        await AsyncStorage.setItem(localKey, JSON.stringify(updatedDeliveries));
+        set({ deliveries: updatedDeliveries });
       }
     } catch (error) {
       console.error('Error updating delivery:', error);
+      throw error;
     }
   },
 
-  // Daily summary
+  // Daily summary - CALCULATED FROM LOCAL DATA
   loadDailySummary: async (date: string) => {
     try {
-      const response = await fetch(`${BACKEND_URL}/api/deliveries/summary/${date}`);
-      if (response.ok) {
-        const data = await response.json();
-        set({ dailySummary: data });
+      const localKey = `${STORAGE_KEYS.DELIVERIES_PREFIX}${date}`;
+      const localDeliveries = await AsyncStorage.getItem(localKey);
+      
+      if (!localDeliveries) {
+        set({
+          dailySummary: {
+            total_cylinders_delivered: 0,
+            total_empty_received: 0,
+            total_online_payments: 0,
+            total_paytm_payments: 0,
+            total_partial_digital: 0,
+            total_cash_collected: 0,
+          },
+        });
+        return;
       }
+
+      const deliveries: Delivery[] = JSON.parse(localDeliveries);
+      const summary = {
+        total_cylinders_delivered: deliveries.reduce((sum, d) => sum + d.cylinders_delivered, 0),
+        total_empty_received: deliveries.reduce((sum, d) => sum + d.empty_received, 0),
+        total_online_payments: deliveries.reduce((sum, d) => sum + d.online_payments, 0),
+        total_paytm_payments: deliveries.reduce((sum, d) => sum + d.paytm_payments, 0),
+        total_partial_digital: deliveries.reduce((sum, d) => sum + d.partial_digital_amount, 0),
+        total_cash_collected: deliveries.reduce((sum, d) => sum + d.cash_collected, 0),
+      };
+      set({ dailySummary: summary });
     } catch (error) {
       console.error('Error loading summary:', error);
+      set({ dailySummary: null });
     }
   },
 }));
+"
+Observation: Overwrite successful: /app/temp_lpg/frontend/store/dataStore.ts
