@@ -9,6 +9,7 @@ import {
   Alert,
   KeyboardAvoidingView,
   Platform,
+  useFocusEffect,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useDataStore } from '../../store/dataStore';
@@ -17,15 +18,16 @@ const BPCL_BLUE = '#017DC5';
 const BPCL_YELLOW = '#FFDC02';
 
 export default function StaffScreen() {
-  // Added loadEmployees to the destructuring
   const { employees, addEmployee, deleteEmployee, loadEmployees } = useDataStore();
   const [newEmployeeName, setNewEmployeeName] = useState('');
   const [isAdding, setIsAdding] = useState(false);
 
-  // CRITICAL FIX: Load employees from local storage when the screen mounts
-  useEffect(() => {
-    loadEmployees();
-  }, []);
+  // ✅ FIX 1: Use useFocusEffect to reload data every time user visits this screen
+  useFocusEffect(
+    React.useCallback(() => {
+      loadEmployees();
+    }, [loadEmployees])
+  );
 
   const handleAddEmployee = async () => {
     if (!newEmployeeName.trim()) {
@@ -37,6 +39,10 @@ export default function StaffScreen() {
       await addEmployee(newEmployeeName.trim());
       setNewEmployeeName('');
       setIsAdding(false);
+      
+      // ✅ FIX 2: Reload employees to show the new one immediately
+      await loadEmployees();
+      
       Alert.alert('Success', 'Employee added successfully');
     } catch (error) {
       Alert.alert('Error', 'Failed to save employee to device storage');
@@ -55,6 +61,10 @@ export default function StaffScreen() {
           onPress: async () => {
             try {
               await deleteEmployee(id);
+              
+              // ✅ FIX 3: Reload employees after deletion
+              await loadEmployees();
+              
               Alert.alert('Success', 'Employee removed successfully');
             } catch (error) {
               Alert.alert('Error', 'Failed to delete employee');
@@ -70,12 +80,12 @@ export default function StaffScreen() {
       style={styles.container}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
-      <View style={styles.header}>
+      <View style={styles.header}>  
         <Text style={styles.headerTitle}>Delivery Staff</Text>
         <Text style={styles.headerSubtitle}>{employees.length} staff members</Text>
       </View>
 
-      <ScrollView style={styles.scrollView}>
+      <ScrollView style={styles.scrollView}>  
         {/* Add New Employee Card */}
         {isAdding ? (
           <View style={styles.addCard}>
@@ -114,32 +124,26 @@ export default function StaffScreen() {
 
         {/* Employee List */}
         <Text style={styles.sectionTitle}>Staff List</Text>
-
         {employees.length === 0 ? (
           <View style={styles.emptyState}>
-            <Ionicons name="people-outline" size={64} color="#ccc" />
-            <Text style={styles.emptyText}>No staff members added yet</Text>
-            <Text style={styles.emptySubtext}>Add delivery staff to start tracking</Text>
+            <Ionicons name="people-outline" size={48} color={BPCL_BLUE} />
+            <Text style={styles.emptyStateText}>No staff members added yet</Text>
           </View>
         ) : (
           employees.map((employee) => (
             <View key={employee.id} style={styles.employeeCard}>
               <View style={styles.employeeInfo}>
-                <View style={styles.employeeAvatar}>
-                  <Ionicons name="person" size={24} color={BPCL_BLUE} />
-                </View>
+                <Ionicons name="person-circle" size={40} color={BPCL_BLUE} />
                 <View style={styles.employeeDetails}>
                   <Text style={styles.employeeName}>{employee.name}</Text>
-                  <Text style={styles.employeeDate}>
-                    Added: {new Date(employee.created_at).toLocaleDateString()}
-                  </Text>
+                  <Text style={styles.employeeDate}>Added: {new Date(employee.created_at).toLocaleDateString()}</Text>
                 </View>
               </View>
               <TouchableOpacity
                 style={styles.deleteButton}
                 onPress={() => handleDeleteEmployee(employee.id, employee.name)}
               >
-                <Ionicons name="trash-outline" size={22} color="#e74c3c" />
+                <Ionicons name="trash-outline" size={20} color="#E74C3C" />
               </TouchableOpacity>
             </View>
           ))
@@ -152,163 +156,150 @@ export default function StaffScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#f5f5f5',
+    backgroundColor: '#F5F5F5',
   },
   header: {
     backgroundColor: BPCL_BLUE,
-    padding: 20,
-    paddingTop: 60,
+    paddingTop: 20,
+    paddingBottom: 20,
+    paddingHorizontal: 16,
   },
   headerTitle: {
-    fontSize: 24,
+    fontSize: 28,
     fontWeight: 'bold',
-    color: '#fff',
+    color: '#FFFFFF',
   },
   headerSubtitle: {
-    fontSize: 16,
+    fontSize: 14,
     color: BPCL_YELLOW,
-    marginTop: 8,
+    marginTop: 4,
   },
   scrollView: {
     flex: 1,
+    padding: 16,
   },
   addButton: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
-    backgroundColor: '#fff',
-    margin: 16,
-    padding: 16,
-    borderRadius: 12,
+    backgroundColor: '#FFFFFF',
+    paddingVertical: 16,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    marginBottom: 20,
     borderWidth: 2,
     borderColor: BPCL_BLUE,
     borderStyle: 'dashed',
   },
   addButtonText: {
-    color: BPCL_BLUE,
+    marginLeft: 8,
     fontSize: 16,
     fontWeight: '600',
+    color: BPCL_BLUE,
   },
   addCard: {
-    backgroundColor: '#fff',
-    margin: 16,
+    backgroundColor: '#FFFFFF',
     padding: 16,
-    borderRadius: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 3,
+    borderRadius: 8,
+    marginBottom: 20,
+    borderWidth: 1,
+    borderColor: '#E0E0E0',
   },
   addTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#333',
+    fontSize: 16,
+    fontWeight: '600',
+    color: BPCL_BLUE,
     marginBottom: 12,
   },
   input: {
-    backgroundColor: '#f8f9fa',
     borderWidth: 1,
-    borderColor: '#ddd',
-    borderRadius: 8,
-    padding: 12,
-    fontSize: 16,
-    marginBottom: 16,
+    borderColor: '#E0E0E0',
+    borderRadius: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 12,
+    fontSize: 14,
   },
   addButtons: {
     flexDirection: 'row',
-    gap: 12,
+    gap: 8,
   },
   cancelButton: {
     flex: 1,
-    backgroundColor: '#f8f9fa',
-    padding: 12,
-    borderRadius: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+    backgroundColor: '#E0E0E0',
     alignItems: 'center',
   },
   cancelButtonText: {
-    color: '#666',
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '600',
+    color: '#333333',
   },
   saveButton: {
     flex: 1,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 6,
     backgroundColor: BPCL_BLUE,
-    padding: 12,
-    borderRadius: 8,
     alignItems: 'center',
   },
   saveButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: 'bold',
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#FFFFFF',
   },
   sectionTitle: {
     fontSize: 18,
-    fontWeight: 'bold',
-    color: '#333',
-    paddingHorizontal: 16,
+    fontWeight: '700',
+    color: BPCL_BLUE,
     marginBottom: 12,
-  },
-  emptyState: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 60,
-  },
-  emptyText: {
-    fontSize: 16,
-    color: '#999',
-    marginTop: 16,
-  },
-  emptySubtext: {
-    fontSize: 14,
-    color: '#ccc',
     marginTop: 8,
   },
   employeeCard: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: '#fff',
-    marginHorizontal: 16,
-    marginBottom: 12,
-    padding: 16,
-    borderRadius: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 2,
-    elevation: 2,
+    backgroundColor: '#FFFFFF',
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    marginBottom: 8,
+    borderLeftWidth: 4,
+    borderLeftColor: BPCL_BLUE,
   },
   employeeInfo: {
     flexDirection: 'row',
     alignItems: 'center',
     flex: 1,
   },
-  employeeAvatar: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: '#e8f4f8',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 12,
-  },
   employeeDetails: {
+    marginLeft: 12,
     flex: 1,
   },
   employeeName: {
     fontSize: 16,
-    fontWeight: 'bold',
-    color: '#333',
-    marginBottom: 4,
+    fontWeight: '600',
+    color: '#333333',
   },
   employeeDate: {
     fontSize: 12,
-    color: '#999',
+    color: '#999999',
+    marginTop: 4,
   },
   deleteButton: {
     padding: 8,
+  },
+  emptyState: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 40,
+  },
+  emptyStateText: {
+    marginTop: 12,
+    fontSize: 16,
+    color: '#999999',
+    fontWeight: '500',
   },
 });
