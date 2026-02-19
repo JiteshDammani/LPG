@@ -209,7 +209,7 @@ export default function DeliveryScreen() {
     >
       <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
         <View style={styles.header}>
-          <Text style={styles.headerTitle}>New Delivery Entry</Text>
+          <Text style={styles.headerTitle}>Delivery Entry</Text>
           <Text style={styles.priceTag}>₹{cylinderPrice.toFixed(2)} per cylinder</Text>
         </View>
 
