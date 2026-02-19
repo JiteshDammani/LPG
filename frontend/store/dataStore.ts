@@ -62,7 +62,7 @@ const STORAGE_KEYS = {
 };
 
 export const useDataStore = create<DataStore>((set, get) => ({
-  cylinderPrice: 877.5,
+  cylinderPrice: 900,
   settings: null,
   employees: [],
   deliveries: [],
