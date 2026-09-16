@@ -18,7 +18,7 @@ import {
   rejectSachinRecord,
   SachinRecord,
   PreviewData,
-} from '@/store/sachinReviewStore';
+} from '@/lib/sachinReviewStore';
 
 const BPCL_BLUE = '#017DC5';
 
@@ -39,7 +39,7 @@ export default function ReviewSachinScreen() {
   const [quantity, setQuantity] = useState('');
   const [amount, setAmount] = useState('');
 
-  // Originals, to detect "changed" state (mirrors data-original / .changed)
+  // Originals, to detect "changed" state
   const [origCategory, setOrigCategory] = useState('');
   const [origRemarks, setOrigRemarks] = useState('');
   const [origRate, setOrigRate] = useState('');
@@ -52,6 +52,21 @@ export default function ReviewSachinScreen() {
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [submitting, setSubmitting] = useState<'approve' | 'reject' | null>(null);
+
+  // ── Auto-calculate amount = rate × quantity ──────────────────────────
+  // Called whenever rate or quantity changes. Updates amount state and
+  // also triggers a preview refresh with the new computed amount.
+  const recalcAmount = useCallback(
+    (nextRate: string, nextQty: string): string => {
+      const r = parseFloat(nextRate);
+      const q = parseInt(nextQty, 10);
+      if (Number.isFinite(r) && Number.isFinite(q) && r > 0 && q > 0) {
+        return String(Math.round(r * q * 100) / 100); // round to 2 dp
+      }
+      return amount; // keep existing if either value isn't valid yet
+    },
+    [amount]
+  );
 
   // ── Load pending record + categories on mount ───────────────────────
   const loadRecord = useCallback(async () => {
@@ -74,7 +89,14 @@ export default function ReviewSachinScreen() {
         setOrigQuantity(String(rec.quantity));
         setOrigAmount(String(rec.amount));
 
-        const pd = await fetchPreviewData(rec.category, rec.remarks, rec.date, rec.quantity);
+        const pd = await fetchPreviewData(
+          rec.category,
+          rec.remarks,
+          rec.date,
+          rec.quantity,
+          rec.transactions,
+          rec.amount
+        );
         setPreview(pd);
       } else {
         setPreview(null);
@@ -93,15 +115,29 @@ export default function ReviewSachinScreen() {
       .catch((e) => console.error('Failed to load categories:', e.message));
   }, [loadRecord]);
 
-  // ── Debounced live preview on category/remarks change ───────────────
+  // ── Debounced live preview ────────────────────────────────────────────
   const schedulePreview = useCallback(
-    (nextCategory: string, nextRemarks: string) => {
+    (
+      nextCategory: string,
+      nextRemarks: string,
+      nextQuantity: string,
+      nextAmount: string
+    ) => {
       if (!record) return;
       if (debounceRef.current) clearTimeout(debounceRef.current);
       debounceRef.current = setTimeout(async () => {
         setPreviewLoading(true);
         try {
-          const pd = await fetchPreviewData(nextCategory, nextRemarks, record.date, record.quantity);
+          const qty = parseInt(nextQuantity, 10);
+          const amt = parseFloat(nextAmount);
+          const pd = await fetchPreviewData(
+            nextCategory,
+            nextRemarks,
+            record.date,
+            Number.isFinite(qty) ? qty : record.quantity,
+            record.transactions,
+            Number.isFinite(amt) ? amt : record.amount
+          );
           setPreview(pd);
         } catch {
           setPreview({ title: 'Preview failed to load.', headers: [], rows: [] });
@@ -116,12 +152,28 @@ export default function ReviewSachinScreen() {
   const handleCategorySelect = (val: string) => {
     setCategory(val);
     setCategoryDropdownOpen(false);
-    schedulePreview(val, remarks);
+    schedulePreview(val, remarks, quantity, amount);
   };
 
   const handleRemarksChange = (val: string) => {
     setRemarks(val);
-    schedulePreview(category, val);
+    schedulePreview(category, val, quantity, amount);
+  };
+
+  // ── Rate change: recalc amount, then preview with new amount ─────────
+  const handleRateChange = (val: string) => {
+    setRate(val);
+    const newAmount = recalcAmount(val, quantity);
+    setAmount(newAmount);
+    schedulePreview(category, remarks, quantity, newAmount);
+  };
+
+  // ── Quantity change: recalc amount, then preview with new amount ──────
+  const handleQuantityChange = (val: string) => {
+    setQuantity(val);
+    const newAmount = recalcAmount(rate, val);
+    setAmount(newAmount);
+    schedulePreview(category, remarks, val, newAmount);
   };
 
   const isChanged = (current: string, orig: string) => current.trim() !== orig.trim();
@@ -266,7 +318,6 @@ export default function ReviewSachinScreen() {
                           {category === cat && <Ionicons name="checkmark" size={16} color="#fff" />}
                         </TouchableOpacity>
                       ))}
-                      {/* Safety fallback: original category not in the table */}
                       {!!record.category && !categories.includes(record.category) && (
                         <TouchableOpacity
                           style={[styles.dropdownItem, category === record.category && styles.dropdownItemSelected]}
@@ -309,7 +360,7 @@ export default function ReviewSachinScreen() {
                       isChanged(rate, origRate) && styles.inputChanged,
                     ]}
                     value={rate}
-                    onChangeText={setRate}
+                    onChangeText={handleRateChange}
                     keyboardType="decimal-pad"
                   />
                 </View>
@@ -321,25 +372,30 @@ export default function ReviewSachinScreen() {
                       isChanged(quantity, origQuantity) && styles.inputChanged,
                     ]}
                     value={quantity}
-                    onChangeText={setQuantity}
+                    onChangeText={handleQuantityChange}
                     keyboardType="number-pad"
                   />
                 </View>
               </View>
 
-              {/* Amount */}
-              <View style={[styles.statBox, { marginTop: 10 }]}>
-                <Text style={styles.statLabel}>Amount</Text>
-                <TextInput
+              {/* Amount — read-only, auto-calculated */}
+              <View style={[styles.statBox, styles.amountBox, { marginTop: 10 }]}>
+                <View style={styles.amountLabelRow}>
+                  <Text style={styles.statLabel}>Amount</Text>
+                  <View style={styles.autoCalcBadge}>
+                    <Ionicons name="calculator-outline" size={11} color={BPCL_BLUE} />
+                    <Text style={styles.autoCalcText}>Rate × Qty</Text>
+                  </View>
+                </View>
+                <Text
                   style={[
                     styles.statInput,
-                    { color: BPCL_BLUE },
-                    isChanged(amount, origAmount) && styles.inputChanged,
+                    styles.amountValue,
+                    isChanged(amount, origAmount) && styles.amountValueChanged,
                   ]}
-                  value={amount}
-                  onChangeText={setAmount}
-                  keyboardType="decimal-pad"
-                />
+                >
+                  {amount || '—'}
+                </Text>
               </View>
 
               {record.paytm_transaction && (
@@ -360,7 +416,10 @@ export default function ReviewSachinScreen() {
                   {submitting === 'approve' ? (
                     <ActivityIndicator color="#fff" />
                   ) : (
-                    <Text style={styles.actionButtonText}>✅ Approve</Text>
+                    <>
+                      <Ionicons name="checkmark" size={18} color="#fff" />
+                      <Text style={styles.actionButtonText}>Approve</Text>
+                    </>
                   )}
                 </TouchableOpacity>
                 <TouchableOpacity
@@ -369,9 +428,12 @@ export default function ReviewSachinScreen() {
                   disabled={submitting !== null}
                 >
                   {submitting === 'reject' ? (
-                    <ActivityIndicator color="#fff" />
+                    <ActivityIndicator color="#e35d6a" />
                   ) : (
-                    <Text style={styles.actionButtonText}>❌ Reject</Text>
+                    <>
+                      <Ionicons name="close" size={18} color="#e35d6a" />
+                      <Text style={styles.rejectButtonText}>Reject</Text>
+                    </>
                   )}
                 </TouchableOpacity>
               </View>
@@ -389,25 +451,29 @@ export default function ReviewSachinScreen() {
               {!!preview?.title && <Text style={styles.previewTitle}>{preview.title}</Text>}
 
               {preview && preview.rows.length > 0 ? (
-                <View style={styles.previewTable}>
-                  <View style={[styles.previewRow, styles.previewHeaderRow]}>
-                    {preview.headers.map((h) => (
-                      <Text key={h} style={styles.previewHeaderCell}>
-                        {h}
-                      </Text>
-                    ))}
-                  </View>
+                <View style={{ gap: 10 }}>
                   {preview.rows.map((row, i) => {
-                    const unpaid = row.join(',').includes('⏳');
+                    const rowText = row.join(' ');
+                    const isPaid = rowText.includes('✅');
+                    const isUnpaid = rowText.includes('⏳');
+                    const isWarning = rowText.includes('⚠️');
                     return (
                       <View
                         key={i}
-                        style={[styles.previewRow, unpaid && styles.previewRowUnpaid]}
+                        style={[
+                          styles.previewRowCard,
+                          isPaid && styles.previewRowCardPaid,
+                          isUnpaid && styles.previewRowCardUnpaid,
+                          isWarning && styles.previewRowCardWarning,
+                        ]}
                       >
                         {row.map((cell, j) => (
-                          <Text key={j} style={styles.previewCell}>
-                            {cell}
-                          </Text>
+                          <View key={j} style={styles.previewFieldRow}>
+                            <Text style={styles.previewFieldLabel}>{preview.headers[j]}</Text>
+                            <Text style={styles.previewFieldValue} numberOfLines={2}>
+                              {cell}
+                            </Text>
+                          </View>
                         ))}
                       </View>
                     );
@@ -553,6 +619,40 @@ const styles = StyleSheet.create({
     padding: 0,
   },
 
+  // Amount box — read-only display
+  amountBox: {
+    borderColor: BPCL_BLUE,
+    borderWidth: 1.5,
+    backgroundColor: '#f0f8ff',
+  },
+  amountLabelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 6,
+  },
+  autoCalcBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    backgroundColor: '#e8f4fd',
+    borderRadius: 10,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  autoCalcText: {
+    fontSize: 10,
+    color: BPCL_BLUE,
+    fontWeight: '600',
+  },
+  amountValue: {
+    color: BPCL_BLUE,
+    fontSize: 22,
+  },
+  amountValueChanged: {
+    color: '#fb6340',
+  },
+
   paytmBadgeWrap: { alignItems: 'center', marginTop: 14 },
   paytmBadge: {
     backgroundColor: '#fb6340',
@@ -564,39 +664,63 @@ const styles = StyleSheet.create({
 
   actionButton: {
     flex: 1,
+    flexDirection: 'row',
+    gap: 6,
     paddingVertical: 14,
     borderRadius: 8,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  approveButton: { backgroundColor: '#2dce89' },
-  rejectButton: { backgroundColor: '#f5365c' },
+  approveButton: { backgroundColor: '#1f7a5c' },
+  rejectButton: {
+    backgroundColor: '#fff',
+    borderWidth: 1.5,
+    borderColor: '#e35d6a',
+  },
   actionButtonText: { color: '#fff', fontSize: 15, fontWeight: '700' },
+  rejectButtonText: { color: '#e35d6a', fontSize: 15, fontWeight: '700' },
 
   emptyState: { alignItems: 'center', paddingVertical: 50 },
   emptyTitle: { fontSize: 18, fontWeight: 'bold', color: '#32325d', marginTop: 16 },
   emptySubtitle: { fontSize: 13, color: '#8898aa', marginTop: 4 },
 
-  previewTitle: { fontSize: 12, color: '#8898aa', marginTop: 6, marginBottom: 10 },
-  previewTable: { borderRadius: 8, overflow: 'hidden', borderWidth: 1, borderColor: '#e9ecef' },
-  previewRow: {
-    flexDirection: 'row',
-    paddingVertical: 8,
-    paddingHorizontal: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f0f0f0',
+  previewTitle: { fontSize: 12, color: '#8898aa', marginTop: 6, marginBottom: 10, lineHeight: 18 },
+
+  previewRowCard: {
+    backgroundColor: '#f8f9fe',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e9ecef',
+    borderLeftWidth: 4,
+    borderLeftColor: '#cbd5e0',
+    padding: 10,
   },
-  previewHeaderRow: { backgroundColor: '#f6f9fc' },
-  previewHeaderCell: {
-    flex: 1,
+  previewRowCardPaid: { borderLeftColor: '#2dce89', backgroundColor: '#f3fdf8' },
+  previewRowCardUnpaid: { borderLeftColor: '#fb6340', backgroundColor: '#fff8f5' },
+  previewRowCardWarning: { borderLeftColor: '#ffc107', backgroundColor: '#fffdf0' },
+
+  previewFieldRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    paddingVertical: 3,
+    gap: 10,
+  },
+  previewFieldLabel: {
     fontSize: 10,
     textTransform: 'uppercase',
-    letterSpacing: 0.8,
+    letterSpacing: 0.6,
     color: '#8898aa',
     fontWeight: '700',
+    flex: 1,
   },
-  previewCell: { flex: 1, fontSize: 12, color: '#32325d' },
-  previewRowUnpaid: { backgroundColor: '#fff5f5' },
+  previewFieldValue: {
+    fontSize: 13,
+    color: '#32325d',
+    fontWeight: '600',
+    flex: 1.4,
+    textAlign: 'right',
+  },
 
   previewEmpty: { alignItems: 'center', paddingVertical: 30 },
   previewEmptyText: { fontSize: 13, color: '#8898aa', marginTop: 8, textAlign: 'center' },

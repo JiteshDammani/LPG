@@ -75,3 +75,6 @@ yarn-error.*
 android-sdk/
 
 app-example
+*.sql 
+google-services.json 
+supabase/.temp/ 

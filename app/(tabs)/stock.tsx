@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   View,
   Text,
@@ -13,16 +13,23 @@ import {
   Modal,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { supabase } from '../../lib/supabase';
 import { format } from 'date-fns';
+import DateTimePicker from '@react-native-community/datetimepicker';
+import { useRole } from '../../hooks/useRole';
 
 const BPCL_BLUE = '#017DC5';
 const BPCL_YELLOW = '#FFDC02';
-const TODAY = format(new Date(), 'yyyy-MM-dd');
 
 // ─── Types ────────────────────────────────────────────────────────────────────
+//
+// NOTE (schema): dashboard_godownftlstocksachin needs `refill` and
+// `new_connection` columns added (same names/types as the existing columns
+// on dashboard_officeftlstocksachin) before Save can write the Godown split.
+// This is a one-time manual Supabase migration — no code here creates columns.
 
-type Product = '14.2 KG Cylinder' | '19 KG Cylinder' | '5 KG - Godown' | '5 KG - Office';
+type Product = '14.2 KG Cylinder' | '19 KG Cylinder' | '5 KG Cylinder';
 
 interface BorrowEntry {
   party_name: string;
@@ -36,19 +43,20 @@ interface TransferEntry {
   quantity: string;
 }
 
-interface CylinderStockData {
+interface Stock142 {
   opening_full: number;
   closing_full: number;
   opening_empty: number;
   closing_empty: number;
   total_refill: number;
+  total_empty_received: number;
   total_nc: number;
   total_dbc: number;
   total_tv: number;
   total_tv_out: number;
 }
 
-interface CommercialStockData {
+interface Stock19 {
   opening_full: number;
   closing_full: number;
   opening_empty: number;
@@ -57,14 +65,14 @@ interface CommercialStockData {
   empty_received: number;
 }
 
-interface GodownStockData {
+interface StockGodown {
   opening_full: number;
   closing_full: number;
   opening_empty: number;
   closing_empty: number;
 }
 
-interface OfficeStockData {
+interface StockOffice {
   opening_full: number;
   closing_full: number;
   opening_empty: number;
@@ -92,35 +100,30 @@ const buildRemarksString = (entries: BorrowEntry[]): string => {
       const parts: string[] = [];
       const fullQty = parseInt(e.full_qty, 10);
       const emptyQty = parseInt(e.empty_qty, 10);
-      if (!isNaN(fullQty) && fullQty !== 0) {
+      if (!isNaN(fullQty) && fullQty !== 0)
         parts.push(`${e.party_name.trim()} (FULL): ${fullQty}`);
-      }
-      if (!isNaN(emptyQty) && emptyQty !== 0) {
+      if (!isNaN(emptyQty) && emptyQty !== 0)
         parts.push(`${e.party_name.trim()} (EMPTY): ${emptyQty}`);
-      }
       return parts.join('; ');
     })
     .filter(Boolean)
     .join('; ');
 };
 
-const calcBorrowedFull = (entries: BorrowEntry[]): number => {
-  return entries.reduce((sum, e) => {
+const calcBorrowedFull = (entries: BorrowEntry[]): number =>
+  entries.reduce((sum, e) => {
     const v = parseInt(e.full_qty, 10);
     return sum + (isNaN(v) ? 0 : v);
   }, 0);
-};
 
-const calcBorrowedEmpty = (entries: BorrowEntry[]): number => {
-  return entries.reduce((sum, e) => {
+const calcBorrowedEmpty = (entries: BorrowEntry[]): number =>
+  entries.reduce((sum, e) => {
     const v = parseInt(e.empty_qty, 10);
     return sum + (isNaN(v) ? 0 : v);
   }, 0);
-};
 
 // ─── Sub Components ───────────────────────────────────────────────────────────
 
-// Calculation Preview Row
 const CalcRow = ({
   label,
   value,
@@ -145,7 +148,6 @@ const CalcRow = ({
   </View>
 );
 
-// Step Header
 const StepHeader = ({ step, title }: { step: number; title: string }) => (
   <View style={styles.stepHeader}>
     <View style={styles.stepBadge}>
@@ -158,6 +160,14 @@ const StepHeader = ({ step, title }: { step: number; title: string }) => (
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function StockScreen() {
+  // ── Date State ─────────────────────────────────────────────────────────────
+  const [selectedDate, setSelectedDate] = useState(format(new Date(), 'yyyy-MM-dd'));
+  const [showDatePicker, setShowDatePicker] = useState(false);
+
+  // Helper: formatted date string used everywhere TODAY was used before —
+  // this is always the DATE PICKER's selected date, never JS's literal "today".
+  const TODAY = format(selectedDate, 'yyyy-MM-dd');
+
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [currentStep, setCurrentStep] = useState(1);
@@ -168,22 +178,35 @@ export default function StockScreen() {
   // ── 14.2 KG State ──────────────────────────────────────────────────────────
   const [receivedFromPlant142, setReceivedFromPlant142] = useState('');
   const [emptyToPlant142, setEmptyToPlant142] = useState('');
-  const [stock142, setStock142] = useState<CylinderStockData | null>(null);
+  const [stock142, setStock142] = useState<Stock142 | null>(null);
 
   // ── 19 KG State ────────────────────────────────────────────────────────────
   const [receivedFromPlant19, setReceivedFromPlant19] = useState('');
-  const [newConnection19, setNewConnection19] = useState('');
-  const [stock19, setStock19] = useState<CommercialStockData | null>(null);
+  const [emptyToPlant19, setEmptyToPlant19] = useState('');
+  const [stock19, setStock19] = useState<Stock19 | null>(null);
 
-  // ── 5KG Godown State ───────────────────────────────────────────────────────
+  // ── 5KG Combined State (Godown + Office) ───────────────────────────────────
   const [receivedFromPlantGodown, setReceivedFromPlantGodown] = useState('');
-  const [stockGodown, setStockGodown] = useState<GodownStockData | null>(null);
+  const [emptyToPlantGodown, setEmptyToPlantGodown] = useState('');
+  const [stockGodown, setStockGodown] = useState<StockGodown | null>(null);
+  const [stockOffice, setStockOffice] = useState<StockOffice | null>(null);
 
-  // ── 5KG Office State ───────────────────────────────────────────────────────
-  const [officeRefill, setOfficeRefill] = useState('');
-  const [officeNC, setOfficeNC] = useState('');
-  const [officeEmptyReceived, setOfficeEmptyReceived] = useState('');
-  const [stockOffice, setStockOffice] = useState<OfficeStockData | null>(null);
+  // Refill / NC — auto-fetched combined totals for the selected date,
+  // editable after fetch.
+  const [totalRefill, setTotalRefill] = useState('0');
+  const [totalNC, setTotalNC] = useState('0');
+
+  // "Any of this from Godown?" checkboxes + the split amounts they record.
+  const [godownRefillChecked, setGodownRefillChecked] = useState(false);
+  const [godownNCChecked, setGodownNCChecked] = useState(false);
+  const [godownRefillSplit, setGodownRefillSplit] = useState('0'); // Y
+  const [godownNCSplit, setGodownNCSplit] = useState('0'); // A
+
+  // Popup modals for entering the Godown split.
+  const [refillSplitModalVisible, setRefillSplitModalVisible] = useState(false);
+  const [ncSplitModalVisible, setNcSplitModalVisible] = useState(false);
+  const [tempRefillSplitInput, setTempRefillSplitInput] = useState('');
+  const [tempNCSplitInput, setTempNCSplitInput] = useState('');
 
   // ── Transfer State (5KG) ───────────────────────────────────────────────────
   const [transfers, setTransfers] = useState<TransferEntry[]>([]);
@@ -199,14 +222,22 @@ export default function StockScreen() {
     setEmptyToPlant142('');
     setStock142(null);
     setReceivedFromPlant19('');
-    setNewConnection19('');
+    setEmptyToPlant19('');
     setStock19(null);
     setReceivedFromPlantGodown('');
+    setEmptyToPlantGodown('');
     setStockGodown(null);
-    setOfficeRefill('');
-    setOfficeNC('');
-    setOfficeEmptyReceived('');
     setStockOffice(null);
+    setTotalRefill('0');
+    setTotalNC('0');
+    setGodownRefillChecked(false);
+    setGodownNCChecked(false);
+    setGodownRefillSplit('0');
+    setGodownNCSplit('0');
+    setRefillSplitModalVisible(false);
+    setNcSplitModalVisible(false);
+    setTempRefillSplitInput('');
+    setTempNCSplitInput('');
     setTransfers([]);
     setBorrowEntries([]);
     setShowConfirmModal(false);
@@ -218,22 +249,119 @@ export default function StockScreen() {
     resetAll();
   };
 
-  // ─── Step 1 → Step 2: Fetch Data ───────────────────────────────────────────
+  // ─── Date Change Handler ───────────────────────────────────────────────────
+
+  const handleDateChange = (_event: any, date?: Date) => {
+    // On Android the picker closes itself; on iOS we close manually
+    if (Platform.OS === 'android') {
+      setShowDatePicker(false);
+    }
+    if (date) {
+      setSelectedDate(format(date, 'yyyy-MM-dd'));
+      // Reset the form when date changes so stale data is cleared
+      resetAll();
+      setSelectedProduct(null);
+    }
+  };
+
+  const handleRefresh = () => {
+    resetAll();
+    setSelectedProduct(null);
+  };
+
+  // ─── 5KG: Auto-fetch Refill/NC totals for the selected date ───────────────
+  // Filters by TODAY (the date-picker's selected date), matching every other
+  // fetch on this screen (fetch142KGData, fetch19KGData, etc.) — not JS's
+  // literal "today".
+
+  const fetchRefillNCTotals = useCallback(async () => {
+    const { data: refillData, error: refillError } = await supabase
+      .from('dashboard_dailyrecordsachin')
+      .select('quantity')
+      .eq('date', TODAY)
+      .eq('category', 'SMALL CYLINDER')
+      .eq('remarks', 'REFILL');
+    if (refillError) throw refillError;
+
+    const { data: ncData, error: ncError } = await supabase
+      .from('dashboard_dailyrecordsachin')
+      .select('quantity')
+      .eq('date', TODAY)
+      .eq('category', 'SMALL CYLINDER')
+      .eq('remarks', 'NC');
+    if (ncError) throw ncError;
+
+    const refillSum = (refillData || []).reduce(
+      (sum: number, r: any) => sum + (parseInt(r.quantity, 10) || 0),
+      0
+    );
+    const ncSum = (ncData || []).reduce(
+      (sum: number, r: any) => sum + (parseInt(r.quantity, 10) || 0),
+      0
+    );
+
+    setTotalRefill(String(refillSum));
+    setTotalNC(String(ncSum));
+    // A fresh fetch invalidates any previously-entered Godown split.
+    setGodownRefillChecked(false);
+    setGodownNCChecked(false);
+    setGodownRefillSplit('0');
+    setGodownNCSplit('0');
+  }, [TODAY]);
+
+  // Auto-fetch as soon as "5 KG Cylinder" is selected on Step 1, per the plan
+  // (fetched, then editable) — no need to wait for "Next".
+  useEffect(() => {
+    if (selectedProduct === '5 KG Cylinder' && currentStep === 1) {
+      fetchRefillNCTotals().catch((err) =>
+        Alert.alert('Error', err?.message || 'Failed to fetch Refill/NC totals')
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedProduct]);
+
+  // ─── Transfer Impact Calculator ────────────────────────────────────────────
+
+  // eslint-disable-next-line react-hooks/rules-of-hooks
+  const calcTransferImpact = useCallback(() => {
+    let godownFullDelta = 0;
+    let godownEmptyDelta = 0;
+    let officeFullDelta = 0;
+    let officeEmptyDelta = 0;
+
+    transfers.forEach((t) => {
+      const qty = parseInt(t.quantity, 10) || 0;
+      if (t.direction === 'godown_to_office') {
+        if (t.type === 'full') {
+          godownFullDelta -= qty;
+          officeFullDelta += qty;
+        } else {
+          godownEmptyDelta -= qty;
+          officeEmptyDelta += qty;
+        }
+      } else {
+        if (t.type === 'full') {
+          officeFullDelta -= qty;
+          godownFullDelta += qty;
+        } else {
+          officeEmptyDelta -= qty;
+          godownEmptyDelta += qty;
+        }
+      }
+    });
+
+    return { godownFullDelta, godownEmptyDelta, officeFullDelta, officeEmptyDelta };
+  }, [transfers]);
+
+  // ─── Step 1 → Step 2: Fetch Data ──────────────────────────────────────────
 
   const handleStep1Next = async () => {
     if (!selectedProduct) return;
     setLoading(true);
-
     try {
-      if (selectedProduct === '14.2 KG Cylinder') {
-        await fetch142KGData();
-      } else if (selectedProduct === '19 KG Cylinder') {
-        await fetch19KGData();
-      } else if (selectedProduct === '5 KG - Godown') {
-        await fetchGodownData();
-      } else if (selectedProduct === '5 KG - Office') {
-        await fetchOfficeData();
-      }
+      if (selectedProduct === '14.2 KG Cylinder') await fetch142KGData();
+      else if (selectedProduct === '19 KG Cylinder') await fetch19KGData();
+      else if (selectedProduct === '5 KG Cylinder') await fetch5KGData();
       setCurrentStep(2);
     } catch (err: any) {
       Alert.alert('Error', err?.message || 'Failed to fetch stock data');
@@ -242,25 +370,21 @@ export default function StockScreen() {
     }
   };
 
-  // ─── 14.2 KG Fetch ─────────────────────────────────────────────────────────
+  // ─── 14.2 KG Fetch ────────────────────────────────────────────────────────
 
   const fetch142KGData = async () => {
-    // Validate inputs
-    if (!receivedFromPlant142 && !emptyToPlant142) {
-      throw new Error('Please enter at least one value');
-    }
-
-    // Fetch latest cylinder stock
+    // Fetch the most recent stock BEFORE the selected date to use as opening
     const { data: stockData, error: stockError } = await supabase
-      .from('dashboard_cylinderstock')
+      .from('dashboard_cylinderstocksachin')
       .select('closing_full, closing_empty')
+      .lt('date', TODAY)          // strictly before selected date
       .order('date', { ascending: false })
       .limit(1)
       .single();
 
     if (stockError) throw stockError;
 
-    // Fetch today's delivery records
+    // Fetch delivery records for the selected date
     const { data: deliveryData, error: deliveryError } = await supabase
       .from('dashboard_deliveryrecords')
       .select('number, empty_received, remarks')
@@ -270,7 +394,6 @@ export default function StockScreen() {
 
     const records = deliveryData || [];
 
-    // Calculate totals
     const totalRefill = records.reduce(
       (sum: number, r: any) => sum + (parseInt(r.number, 10) || 0),
       0
@@ -290,12 +413,15 @@ export default function StockScreen() {
       const num = parseInt(r.number, 10) || 0;
       const empty = parseInt(r.empty_received, 10) || 0;
       const remarks = r.remarks || '';
-
       totalNC += parseRemarksForNC(remarks);
       totalDBC += parseRemarksForDBC(remarks);
-
-      if (empty > num) totalTV += 1;
-      if (num > empty) totalTVOut += 1;
+      // Each record's discrepancy is summed into its own bucket — a
+      // shortage on one delivery and a surplus on another are two
+      // separate real-world events and must NOT cancel each other out.
+      // Per business rule: empty received MORE than delivered → TV Out (extra).
+      // empty received LESS than delivered → TV (missing/short).
+      if (empty > num) totalTVOut += (empty - num);
+      if (num > empty) totalTV += (num - empty);
     });
 
     const openingFull = stockData?.closing_full || 0;
@@ -303,15 +429,13 @@ export default function StockScreen() {
     const receivedPlant = parseInt(receivedFromPlant142, 10) || 0;
     const emptyPlant = parseInt(emptyToPlant142, 10) || 0;
 
-    const closingFull = openingFull + receivedPlant - totalRefill;
-    const closingEmpty = openingEmpty + totalEmptyReceived - emptyPlant;
-
     setStock142({
       opening_full: openingFull,
-      closing_full: closingFull,
+      closing_full: openingFull + receivedPlant - totalRefill,
       opening_empty: openingEmpty,
-      closing_empty: closingEmpty,
+      closing_empty: openingEmpty + totalEmptyReceived - emptyPlant,
       total_refill: totalRefill,
+      total_empty_received: totalEmptyReceived,
       total_nc: totalNC,
       total_dbc: totalDBC,
       total_tv: totalTV,
@@ -319,24 +443,24 @@ export default function StockScreen() {
     });
   };
 
-  // ─── 19 KG Fetch ───────────────────────────────────────────────────────────
+  // ─── 19 KG Fetch ──────────────────────────────────────────────────────────
 
   const fetch19KGData = async () => {
     if (!receivedFromPlant19) {
       throw new Error('Please enter cylinders received from plant');
     }
 
-    // Fetch latest commercial stock
+    // Fetch the most recent stock BEFORE the selected date
     const { data: stockData, error: stockError } = await supabase
-      .from('dashboard_commercialstock')
+      .from('dashboard_commercialstocksachin')
       .select('closing_full, closing_empty')
+      .lt('date', TODAY)          // strictly before selected date
       .order('date', { ascending: false })
       .limit(1)
       .single();
 
     if (stockError) throw stockError;
 
-    // Fetch today's commercial records - count rows for delivered
     const { data: deliveredData, error: deliveredError } = await supabase
       .from('dashboard_commercialrecords')
       .select('id')
@@ -344,7 +468,6 @@ export default function StockScreen() {
 
     if (deliveredError) throw deliveredError;
 
-    // Fetch today's commercial records - count rows for empty received
     const { data: emptyData, error: emptyError } = await supabase
       .from('dashboard_commercialrecords')
       .select('id')
@@ -355,77 +478,261 @@ export default function StockScreen() {
     const openingFull = stockData?.closing_full || 0;
     const openingEmpty = stockData?.closing_empty || 0;
     const fromBpcl = parseInt(receivedFromPlant19, 10) || 0;
-    const nc = parseInt(newConnection19, 10) || 0;
+    const emptyToPlant = parseInt(emptyToPlant19, 10) || 0;
     const cylinderDelivered = deliveredData?.length || 0;
     const emptyReceived = emptyData?.length || 0;
 
-    const closingFull = openingFull + fromBpcl - cylinderDelivered - nc;
-    const closingEmpty = openingEmpty + emptyReceived;
-
     setStock19({
       opening_full: openingFull,
-      closing_full: closingFull,
+      closing_full: openingFull + fromBpcl - cylinderDelivered,
       opening_empty: openingEmpty,
-      closing_empty: closingEmpty,
+      closing_empty: openingEmpty + emptyReceived - emptyToPlant,
       cylinder_delivered: cylinderDelivered,
       empty_received: emptyReceived,
     });
   };
 
-  // ─── 5KG Godown Fetch ──────────────────────────────────────────────────────
+  // ─── 5KG Combined Fetch (Godown + Office opening stock, plus Refill/NC) ───
 
-  const fetchGodownData = async () => {
-    const { data: stockData, error: stockError } = await supabase
-      .from('dashboard_godownftlstock')
+  const fetch5KGData = async () => {
+    // Fetch the most recent Godown stock BEFORE the selected date
+    const { data: godownData, error: godownError } = await supabase
+      .from('dashboard_godownftlstocksachin')
       .select('closing_full, closing_empty')
+      .lt('date', TODAY)          // strictly before selected date
       .order('date', { ascending: false })
       .limit(1)
       .single();
 
-    if (stockError) throw stockError;
+    if (godownError) throw godownError;
+
+    // Fetch the most recent Office stock BEFORE the selected date
+    const { data: officeData, error: officeError } = await supabase
+      .from('dashboard_officeftlstocksachin')
+      .select('closing_full, closing_empty')
+      .lt('date', TODAY)          // strictly before selected date
+      .order('date', { ascending: false })
+      .limit(1)
+      .single();
+
+    if (officeError) throw officeError;
 
     setStockGodown({
-      opening_full: stockData?.closing_full || 0,
-      closing_full: stockData?.closing_full || 0,
-      opening_empty: stockData?.closing_empty || 0,
-      closing_empty: stockData?.closing_empty || 0,
+      opening_full: godownData?.closing_full || 0,
+      closing_full: godownData?.closing_full || 0,
+      opening_empty: godownData?.closing_empty || 0,
+      closing_empty: godownData?.closing_empty || 0,
     });
-  };
-
-  // ─── 5KG Office Fetch ──────────────────────────────────────────────────────
-
-  const fetchOfficeData = async () => {
-    if (!officeRefill && !officeNC) {
-      throw new Error('Please enter refill or new connection count');
-    }
-
-    const { data: stockData, error: stockError } = await supabase
-      .from('dashboard_officeftlstock')
-      .select('closing_full, closing_empty')
-      .order('date', { ascending: false })
-      .limit(1)
-      .single();
-
-    if (stockError) throw stockError;
-
-    const openingFull = stockData?.closing_full || 0;
-    const openingEmpty = stockData?.closing_empty || 0;
-    const refill = parseInt(officeRefill, 10) || 0;
-    const nc = parseInt(officeNC, 10) || 0;
-    const emptyIn = parseInt(officeEmptyReceived, 10) || 0;
-
-    const closingFull = openingFull - refill - nc;
-    const closingEmpty = openingEmpty + emptyIn;
 
     setStockOffice({
-      opening_full: openingFull,
-      closing_full: closingFull,
-      opening_empty: openingEmpty,
-      closing_empty: closingEmpty,
+      opening_full: officeData?.closing_full || 0,
+      closing_full: officeData?.closing_full || 0,
+      opening_empty: officeData?.closing_empty || 0,
+      closing_empty: officeData?.closing_empty || 0,
     });
+
+    // Refresh Refill/NC totals too, in case the user changed the date after
+    // the Step-1 auto-fetch already ran.
+    await fetchRefillNCTotals();
   };
 
-  // ─── Transfer Handlers ─────────────────────────────────────────────────────
+  // ─── 5KG Split Helpers ─────────────────────────────────────────────────────
+
+  const openRefillSplitModal = () => {
+    setTempRefillSplitInput(godownRefillSplit !== '0' ? godownRefillSplit : '');
+    setRefillSplitModalVisible(true);
+  };
+
+  const openNCSplitModal = () => {
+    setTempNCSplitInput(godownNCSplit !== '0' ? godownNCSplit : '');
+    setNcSplitModalVisible(true);
+  };
+
+  const handleRefillCheckboxToggle = () => {
+    if (godownRefillChecked) {
+      setGodownRefillChecked(false);
+      setGodownRefillSplit('0');
+    } else {
+      openRefillSplitModal();
+    }
+  };
+
+  const handleNCCheckboxToggle = () => {
+    if (godownNCChecked) {
+      setGodownNCChecked(false);
+      setGodownNCSplit('0');
+    } else {
+      openNCSplitModal();
+    }
+  };
+
+  const confirmRefillSplit = () => {
+    const total = parseInt(totalRefill, 10) || 0;
+    const val = parseInt(tempRefillSplitInput, 10);
+    if (isNaN(val) || val < 0 || val > total) {
+      Alert.alert('Invalid value', `Godown refill must be between 0 and ${total}.`);
+      return;
+    }
+    setGodownRefillSplit(String(val));
+    setGodownRefillChecked(true);
+    setRefillSplitModalVisible(false);
+  };
+
+  const confirmNCSplit = () => {
+    const total = parseInt(totalNC, 10) || 0;
+    const val = parseInt(tempNCSplitInput, 10);
+    if (isNaN(val) || val < 0 || val > total) {
+      Alert.alert('Invalid value', `Godown NC must be between 0 and ${total}.`);
+      return;
+    }
+    setGodownNCSplit(String(val));
+    setGodownNCChecked(true);
+    setNcSplitModalVisible(false);
+  };
+
+  const cancelRefillSplitModal = () => {
+    setRefillSplitModalVisible(false);
+    if ((parseInt(godownRefillSplit, 10) || 0) === 0) setGodownRefillChecked(false);
+  };
+
+  const cancelNCSplitModal = () => {
+    setNcSplitModalVisible(false);
+    if ((parseInt(godownNCSplit, 10) || 0) === 0) setGodownNCChecked(false);
+  };
+
+  // ─── Get Final Calculations: 14.2 / 19 KG ─────────────────────────────────
+
+  // eslint-disable-next-line react-hooks/rules-of-hooks
+  const getFinalCalculations = useCallback(() => {
+    const borrowedFull = calcBorrowedFull(borrowEntries);
+    const borrowedEmpty = calcBorrowedEmpty(borrowEntries);
+    const remarks = buildRemarksString(borrowEntries);
+
+    if (selectedProduct === '14.2 KG Cylinder' && stock142) {
+      return {
+        closingFull: stock142.closing_full + borrowedFull,
+        closingEmpty: stock142.closing_empty + borrowedEmpty,
+        remarks,
+      };
+    }
+
+    if (selectedProduct === '19 KG Cylinder' && stock19) {
+      return {
+        closingFull: stock19.closing_full + borrowedFull,
+        closingEmpty: stock19.closing_empty + borrowedEmpty,
+        remarks,
+      };
+    }
+
+    return { closingFull: 0, closingEmpty: 0, remarks: '' };
+  }, [selectedProduct, stock142, stock19, borrowEntries]);
+
+  // ─── Get Final Calculations: 5KG Combined (Godown + Office) ──────────────
+  //
+  // NOTE (assumption): Borrow/Give entries are not location-tagged by the
+  // UI, so — consistent with how borrow/give has historically applied to
+  // the customer-facing side of 5KG stock — borrowedFull/borrowedEmpty are
+  // applied to the Office leg only. Godown's closing figures are driven
+  // purely by BPCL receipts, transfers, and its Refill/NC split.
+  //
+  // EMPTY RETURN RULE: the empty cylinders collected on a refill delivery
+  // physically come back to Godown regardless of whether the full cylinder
+  // was billed against the Office or Godown portion — so the FULL refill
+  // total's empty return goes to Godown, and Office's empty side does NOT
+  // get any refill-return addition.
+
+  // eslint-disable-next-line react-hooks/rules-of-hooks
+  const get5KGCalculations = useCallback(() => {
+    const borrowedFull = calcBorrowedFull(borrowEntries);
+    const borrowedEmpty = calcBorrowedEmpty(borrowEntries);
+    const remarks = buildRemarksString(borrowEntries);
+    const {
+      godownFullDelta,
+      godownEmptyDelta,
+      officeFullDelta,
+      officeEmptyDelta,
+    } = calcTransferImpact();
+
+    const fromBpcl = parseInt(receivedFromPlantGodown, 10) || 0;
+    const emptyToPlant = parseInt(emptyToPlantGodown, 10) || 0;
+    const totalRefillNum = parseInt(totalRefill, 10) || 0;
+    const totalNCNum = parseInt(totalNC, 10) || 0;
+    const godownRefillY = parseInt(godownRefillSplit, 10) || 0;
+    const godownNCY = parseInt(godownNCSplit, 10) || 0;
+    const officeRefillPortion = totalRefillNum - godownRefillY;
+    const officeNCPortion = totalNCNum - godownNCY;
+
+    if (!stockGodown || !stockOffice) {
+      return {
+        godownClosingFull: 0,
+        godownClosingEmpty: 0,
+        officeClosingFull: 0,
+        officeClosingEmpty: 0,
+        officeRefillPortion,
+        officeNCPortion,
+        godownRefillSplitVal: godownRefillY,
+        godownNCSplitVal: godownNCY,
+        borrowedFull,
+        borrowedEmpty,
+        remarks,
+      };
+    }
+
+    const godownClosingFull =
+      stockGodown.opening_full +
+      fromBpcl +
+      godownFullDelta -
+      godownRefillY -
+      godownNCY;
+
+    // All refill empty returns (Office portion + Godown portion) land on
+    // Godown, not just Godown's own Y portion.
+    const godownClosingEmpty =
+      stockGodown.opening_empty -
+      emptyToPlant +
+      godownEmptyDelta +
+      totalRefillNum;
+
+    const officeClosingFull =
+      stockOffice.opening_full +
+      officeFullDelta -
+      officeRefillPortion -
+      officeNCPortion +
+      borrowedFull;
+
+    // No refill-return addition on Office's empty side — it all goes to Godown.
+    const officeClosingEmpty =
+      stockOffice.opening_empty +
+      officeEmptyDelta +
+      borrowedEmpty;
+
+    return {
+      godownClosingFull,
+      godownClosingEmpty,
+      officeClosingFull,
+      officeClosingEmpty,
+      officeRefillPortion,
+      officeNCPortion,
+      godownRefillSplitVal: godownRefillY,
+      godownNCSplitVal: godownNCY,
+      borrowedFull,
+      borrowedEmpty,
+      remarks,
+    };
+  }, [
+    stockGodown,
+    stockOffice,
+    receivedFromPlantGodown,
+    emptyToPlantGodown,
+    totalRefill,
+    totalNC,
+    godownRefillSplit,
+    godownNCSplit,
+    borrowEntries,
+    calcTransferImpact,
+  ]);
+
+  // ─── Transfer Handlers ────────────────────────────────────────────────────
 
   const addTransfer = () => {
     setTransfers((prev) => [
@@ -450,40 +757,7 @@ export default function StockScreen() {
     setTransfers((prev) => prev.filter((_, i) => i !== index));
   };
 
-  // Calculate transfer impact on godown and office
-  const calcTransferImpact = () => {
-    let godownFullDelta = 0;
-    let godownEmptyDelta = 0;
-    let officeFullDelta = 0;
-    let officeEmptyDelta = 0;
-
-    transfers.forEach((t) => {
-      const qty = parseInt(t.quantity, 10) || 0;
-
-      if (t.direction === 'godown_to_office') {
-        if (t.type === 'full') {
-          godownFullDelta -= qty;
-          officeFullDelta += qty;
-        } else {
-          godownEmptyDelta -= qty;
-          officeEmptyDelta += qty;
-        }
-      } else {
-        // office_to_godown
-        if (t.type === 'full') {
-          officeFullDelta -= qty;
-          godownFullDelta += qty;
-        } else {
-          officeEmptyDelta -= qty;
-          godownEmptyDelta += qty;
-        }
-      }
-    });
-
-    return { godownFullDelta, godownEmptyDelta, officeFullDelta, officeEmptyDelta };
-  };
-
-  // ─── Borrow/Give Handlers ──────────────────────────────────────────────────
+  // ─── Borrow Handlers ──────────────────────────────────────────────────────
 
   const addBorrowEntry = () => {
     setBorrowEntries((prev) => [
@@ -508,125 +782,65 @@ export default function StockScreen() {
     setBorrowEntries((prev) => prev.filter((_, i) => i !== index));
   };
 
-  // ─── Final Calculations with Borrow/Give ───────────────────────────────────
-
-  const getFinalCalculations = () => {
-    const borrowedFull = calcBorrowedFull(borrowEntries);
-    const borrowedEmpty = calcBorrowedEmpty(borrowEntries);
-    const remarks = buildRemarksString(borrowEntries);
-    const { godownFullDelta, godownEmptyDelta, officeFullDelta, officeEmptyDelta } =
-      calcTransferImpact();
-
-    if (selectedProduct === '14.2 KG Cylinder' && stock142) {
-      return {
-        closingFull: stock142.closing_full + borrowedFull,
-        closingEmpty: stock142.closing_empty + borrowedEmpty,
-        remarks,
-      };
-    }
-
-    if (selectedProduct === '19 KG Cylinder' && stock19) {
-      return {
-        closingFull: stock19.closing_full + borrowedFull,
-        closingEmpty: stock19.closing_empty + borrowedEmpty,
-        remarks,
-      };
-    }
-
-    if (selectedProduct === '5 KG - Godown' && stockGodown) {
-      const fromBpcl = parseInt(receivedFromPlantGodown, 10) || 0;
-      const closingFull =
-        stockGodown.opening_full + fromBpcl + godownFullDelta + borrowedFull;
-      const closingEmpty =
-        stockGodown.opening_empty + godownEmptyDelta + borrowedEmpty;
-      return { closingFull, closingEmpty, remarks };
-    }
-
-    if (selectedProduct === '5 KG - Office' && stockOffice) {
-      const closingFull = stockOffice.closing_full + officeFullDelta + borrowedFull;
-      const closingEmpty = stockOffice.closing_empty + officeEmptyDelta + borrowedEmpty;
-      return { closingFull, closingEmpty, remarks };
-    }
-
-    return { closingFull: 0, closingEmpty: 0, remarks: '' };
-  };
-
-  // ─── Save ──────────────────────────────────────────────────────────────────
+  // ─── Save ─────────────────────────────────────────────────────────────────
 
   const handleSave = async () => {
     setSaving(true);
     try {
-      const { closingFull, closingEmpty, remarks } = getFinalCalculations();
-      const { godownFullDelta, godownEmptyDelta, officeFullDelta, officeEmptyDelta } =
-        calcTransferImpact();
-
+      // ── 14.2 KG ───────────────────────────────────────────────────────────
       if (selectedProduct === '14.2 KG Cylinder' && stock142) {
+        const { closingFull, closingEmpty, remarks } = getFinalCalculations();
         const receivedPlant = parseInt(receivedFromPlant142, 10) || 0;
-        const emptyPlant = parseInt(emptyToPlant142, 10) || 0;
-
         const { error } = await supabase
-          .from('dashboard_cylinderstock')
-          .insert([
-            {
-              date: TODAY,
-              opening_full: stock142.opening_full,
-              add_full: receivedPlant,
-              total_refill: stock142.total_refill,
-              total_nc: stock142.total_nc,
-              total_dbc: stock142.total_dbc,
-              total_tv: stock142.total_tv,
-              total_tv_out: stock142.total_tv_out,
-              closing_full: closingFull,
-              opening_empty: stock142.opening_empty,
-              closing_empty: closingEmpty,
-              remarks: remarks || '',
-            },
-          ]);
-
+          .from('dashboard_cylinderstocksachin')
+          .insert([{
+            date: TODAY,
+            opening_full: stock142.opening_full,
+            add_full: receivedPlant,
+            total_refill: stock142.total_refill,
+            total_nc: stock142.total_nc,
+            total_dbc: stock142.total_dbc,
+            total_tv: stock142.total_tv,
+            total_tv_out: stock142.total_tv_out,
+            closing_full: closingFull,
+            opening_empty: stock142.opening_empty,
+            closing_empty: closingEmpty,
+            remarks: remarks || '',
+          }]);
         if (error) throw error;
       }
 
+      // ── 19 KG ─────────────────────────────────────────────────────────────
       if (selectedProduct === '19 KG Cylinder' && stock19) {
+        const { closingFull, closingEmpty, remarks } = getFinalCalculations();
         const fromBpcl = parseInt(receivedFromPlant19, 10) || 0;
-        const nc = parseInt(newConnection19, 10) || 0;
-
         const { error } = await supabase
-          .from('dashboard_commercialstock')
-          .insert([
-            {
-              date: TODAY,
-              opening_full: stock19.opening_full,
-              from_bpcl: fromBpcl,
-              empty_received: stock19.empty_received,
-              cylinder_delivered: stock19.cylinder_delivered,
-              closing_full: closingFull,
-              opening_empty: stock19.opening_empty,
-              new_connection: nc,
-              closing_empty: closingEmpty,
-              remarks: remarks || '',
-            },
-          ]);
-
+          .from('dashboard_commercialstocksachin')
+          .insert([{
+            date: TODAY,
+            opening_full: stock19.opening_full,
+            from_bpcl: fromBpcl,
+            empty_received: stock19.empty_received,
+            cylinder_delivered: stock19.cylinder_delivered,
+            closing_full: closingFull,
+            opening_empty: stock19.opening_empty,
+            new_connection: 0,
+            closing_empty: closingEmpty,
+            remarks: remarks || '',
+          }]);
         if (error) throw error;
       }
 
-      if (
-        (selectedProduct === '5 KG - Godown' ||
-          selectedProduct === '5 KG - Office') &&
-        stockGodown &&
-        stockOffice
-      ) {
+      // ── 5KG Combined: dual insert (Godown + Office) from one Step 1 entry ──
+      if (selectedProduct === '5 KG Cylinder' && stockGodown && stockOffice) {
+        const calc = get5KGCalculations();
         const fromBpcl = parseInt(receivedFromPlantGodown, 10) || 0;
-        const refill = parseInt(officeRefill, 10) || 0;
-        const nc = parseInt(officeNC, 10) || 0;
-        const emptyIn = parseInt(officeEmptyReceived, 10) || 0;
 
-        // Calculate transfer columns for godown
         const sentToOffice = transfers
           .filter((t) => t.direction === 'godown_to_office' && t.type === 'full')
           .reduce((sum, t) => sum + (parseInt(t.quantity, 10) || 0), 0);
 
-        const receivedFromOffice = transfers
+        const receivedFromOfficeAtGodown = transfers
           .filter((t) => t.direction === 'office_to_godown' && t.type === 'full')
           .reduce((sum, t) => sum + (parseInt(t.quantity, 10) || 0), 0);
 
@@ -638,54 +852,45 @@ export default function StockScreen() {
           .filter((t) => t.direction === 'office_to_godown' && t.type === 'empty')
           .reduce((sum, t) => sum + (parseInt(t.quantity, 10) || 0), 0);
 
-        const godownFinalFull =
-          stockGodown.opening_full + fromBpcl + godownFullDelta + calcBorrowedFull(borrowEntries);
-        const godownFinalEmpty =
-          stockGodown.opening_empty + godownEmptyDelta + calcBorrowedEmpty(borrowEntries);
+        // Remarks trail (point 8): append the split so it's auditable later.
+        const splitTrail = `Godown Refill: ${calc.godownRefillSplitVal}, Office Refill: ${calc.officeRefillPortion}, Godown NC: ${calc.godownNCSplitVal}, Office NC: ${calc.officeNCPortion}`;
+        const combinedRemarks = [calc.remarks, splitTrail].filter(Boolean).join('; ');
 
-        const officeFinalFull =
-          stockOffice.opening_full + officeFullDelta - refill - nc + calcBorrowedFull(borrowEntries);
-        const officeFinalEmpty =
-          stockOffice.opening_empty + emptyIn + officeEmptyDelta + calcBorrowedEmpty(borrowEntries);
+        // Godown row — requires refill/new_connection columns to already
+        // exist (see schema note at top of file).
+        const { error: godownErr } = await supabase
+          .from('dashboard_godownftlstocksachin')
+          .insert([{
+            date: TODAY,
+            opening_full: stockGodown.opening_full,
+            from_bpcl: fromBpcl,
+            sent_to_office: sentToOffice,
+            received_from_office: receivedFromOfficeAtGodown,
+            refill: calc.godownRefillSplitVal,
+            new_connection: calc.godownNCSplitVal,
+            closing_full: calc.godownClosingFull,
+            opening_empty: stockGodown.opening_empty,
+            closing_empty: calc.godownClosingEmpty,
+            remarks: combinedRemarks,
+          }]);
+        if (godownErr) throw godownErr;
 
-        // Insert Godown
-        const { error: godownError } = await supabase
-          .from('dashboard_godownftlstock')
-          .insert([
-            {
-              date: TODAY,
-              opening_full: stockGodown.opening_full,
-              from_bpcl: fromBpcl,
-              sent_to_office: sentToOffice,
-              received_from_office: receivedFromOffice,
-              closing_full: godownFinalFull,
-              opening_empty: stockGodown.opening_empty,
-              closing_empty: godownFinalEmpty,
-              remarks: remarks || '',
-            },
-          ]);
-
-        if (godownError) throw godownError;
-
-        // Insert Office
-        const { error: officeError } = await supabase
-          .from('dashboard_officeftlstock')
-          .insert([
-            {
-              date: TODAY,
-              opening_full: stockOffice.opening_full,
-              add_office_stock: addOfficeStock,
-              refill,
-              new_connection: nc,
-              closing_full: officeFinalFull,
-              opening_empty: stockOffice.opening_empty,
-              to_godown: toGodown,
-              closing_empty: officeFinalEmpty,
-              remarks: remarks || '',
-            },
-          ]);
-
-        if (officeError) throw officeError;
+        // Office row — refill/new_connection carry only the Office portion.
+        const { error: officeErr } = await supabase
+          .from('dashboard_officeftlstocksachin')
+          .insert([{
+            date: TODAY,
+            opening_full: stockOffice.opening_full,
+            add_office_stock: addOfficeStock,
+            refill: calc.officeRefillPortion,
+            new_connection: calc.officeNCPortion,
+            closing_full: calc.officeClosingFull,
+            opening_empty: stockOffice.opening_empty,
+            to_godown: toGodown,
+            closing_empty: calc.officeClosingEmpty,
+            remarks: combinedRemarks,
+          }]);
+        if (officeErr) throw officeErr;
       }
 
       setShowConfirmModal(false);
@@ -700,23 +905,20 @@ export default function StockScreen() {
     }
   };
 
-  // ─── Get Final Numbers for Modal ───────────────────────────────────────────
+  // ─── Helpers ──────────────────────────────────────────────────────────────
 
-  const getFinalNumbers = () => {
-    const { closingFull, closingEmpty, remarks } = getFinalCalculations();
-    const borrowedFull = calcBorrowedFull(borrowEntries);
-    const borrowedEmpty = calcBorrowedEmpty(borrowEntries);
-    return { closingFull, closingEmpty, remarks, borrowedFull, borrowedEmpty };
-  };
+  const is5KG = selectedProduct === '5 KG Cylinder';
 
-  // ─── Render Step 1 ─────────────────────────────────────────────────────────
+  const getBorrowStep = () => (is5KG ? 4 : 3);
+
+  // ─── Render: Step 1 ───────────────────────────────────────────────────────
 
   const renderStep1 = () => {
     if (!selectedProduct) return null;
 
     return (
       <View style={styles.card}>
-        <StepHeader step={1} title="Enter Plant Details" />
+        <StepHeader step={1} title="Enter Details" />
 
         {selectedProduct === '14.2 KG Cylinder' && (
           <>
@@ -726,7 +928,13 @@ export default function StockScreen() {
               placeholder="0"
               keyboardType="numeric"
               value={receivedFromPlant142}
-              onChangeText={setReceivedFromPlant142}
+              onChangeText={(v) => {
+                setReceivedFromPlant142(v);
+                // Real-time copy: sent-to-plant is usually the same qty as
+                // received (equal empties go back). Still editable after —
+                // it just gets re-synced if "received" changes again later.
+                setEmptyToPlant142(v);
+              }}
             />
             <Text style={[styles.label, { marginTop: 16 }]}>
               Empty Cylinders Sent to Plant
@@ -749,22 +957,28 @@ export default function StockScreen() {
               placeholder="0"
               keyboardType="numeric"
               value={receivedFromPlant19}
-              onChangeText={setReceivedFromPlant19}
+              onChangeText={(v) => {
+                setReceivedFromPlant19(v);
+                // Real-time copy: sent-to-plant is usually the same qty as
+                // received. Still editable after — only re-synced if
+                // "received" changes again later.
+                setEmptyToPlant19(v);
+              }}
             />
             <Text style={[styles.label, { marginTop: 16 }]}>
-              New Connections
+              Empty Cylinders Sent to Plant
             </Text>
             <TextInput
               style={styles.input}
               placeholder="0"
               keyboardType="numeric"
-              value={newConnection19}
-              onChangeText={setNewConnection19}
+              value={emptyToPlant19}
+              onChangeText={setEmptyToPlant19}
             />
           </>
         )}
 
-        {selectedProduct === '5 KG - Godown' && (
+        {selectedProduct === '5 KG Cylinder' && (
           <>
             <Text style={styles.label}>Cylinders Received from Plant (BPCL)</Text>
             <TextInput
@@ -772,42 +986,103 @@ export default function StockScreen() {
               placeholder="0"
               keyboardType="numeric"
               value={receivedFromPlantGodown}
-              onChangeText={setReceivedFromPlantGodown}
+              onChangeText={(v) => {
+                setReceivedFromPlantGodown(v);
+                // Real-time copy: sent-to-plant is usually the same qty as
+                // received. Still editable after — only re-synced if
+                // "received" changes again later.
+                setEmptyToPlantGodown(v);
+              }}
             />
-          </>
-        )}
+            <Text style={[styles.label, { marginTop: 16 }]}>
+              Empty Cylinders Sent to Plant
+            </Text>
+            <TextInput
+              style={styles.input}
+              placeholder="0"
+              keyboardType="numeric"
+              value={emptyToPlantGodown}
+              onChangeText={setEmptyToPlantGodown}
+            />
 
-        {selectedProduct === '5 KG - Office' && (
-          <>
-            <Text style={styles.label}>Refill Delivered Today</Text>
+            {/* ── Refill ── */}
+            <Text style={[styles.label, { marginTop: 16 }]}>
+              Refill Delivered Today (Combined)
+            </Text>
+            <Text style={styles.hintText}>
+              Auto-fetched from today's records — editable if needed
+            </Text>
             <TextInput
               style={styles.input}
               placeholder="0"
               keyboardType="numeric"
-              value={officeRefill}
-              onChangeText={setOfficeRefill}
+              value={totalRefill}
+              onChangeText={setTotalRefill}
             />
-            <Text style={[styles.label, { marginTop: 16 }]}>New Connections</Text>
+            <TouchableOpacity
+              style={styles.checkboxRow}
+              onPress={handleRefillCheckboxToggle}
+              disabled={(parseInt(totalRefill, 10) || 0) === 0}
+            >
+              <Ionicons
+                name={godownRefillChecked ? 'checkbox' : 'square-outline'}
+                size={20}
+                color={
+                  (parseInt(totalRefill, 10) || 0) === 0 ? '#ccc' : BPCL_BLUE
+                }
+              />
+              <Text
+                style={[
+                  styles.checkboxLabel,
+                  (parseInt(totalRefill, 10) || 0) === 0 && { color: '#ccc' },
+                ]}
+              >
+                Any of this from Godown?
+              </Text>
+            </TouchableOpacity>
+            {godownRefillChecked && (
+              <Text style={styles.splitPreviewText}>
+                Office Refill: {(parseInt(totalRefill, 10) || 0) - (parseInt(godownRefillSplit, 10) || 0)}, Godown Refill: {parseInt(godownRefillSplit, 10) || 0}
+              </Text>
+            )}
+
+            {/* ── NC ── */}
+            <Text style={[styles.label, { marginTop: 16 }]}>
+              New Connections (Combined)
+            </Text>
+            <Text style={styles.hintText}>
+              Auto-fetched from today's records — editable if needed
+            </Text>
             <TextInput
               style={styles.input}
               placeholder="0"
               keyboardType="numeric"
-              value={officeNC}
-              onChangeText={setOfficeNC}
+              value={totalNC}
+              onChangeText={setTotalNC}
             />
-            {(parseInt(officeRefill, 10) > 0 || parseInt(officeNC, 10) > 0) && (
-              <>
-                <Text style={[styles.label, { marginTop: 16 }]}>
-                  Empty Cylinders Received from Customers
-                </Text>
-                <TextInput
-                  style={styles.input}
-                  placeholder="0"
-                  keyboardType="numeric"
-                  value={officeEmptyReceived}
-                  onChangeText={setOfficeEmptyReceived}
-                />
-              </>
+            <TouchableOpacity
+              style={styles.checkboxRow}
+              onPress={handleNCCheckboxToggle}
+              disabled={(parseInt(totalNC, 10) || 0) === 0}
+            >
+              <Ionicons
+                name={godownNCChecked ? 'checkbox' : 'square-outline'}
+                size={20}
+                color={(parseInt(totalNC, 10) || 0) === 0 ? '#ccc' : BPCL_BLUE}
+              />
+              <Text
+                style={[
+                  styles.checkboxLabel,
+                  (parseInt(totalNC, 10) || 0) === 0 && { color: '#ccc' },
+                ]}
+              >
+                Any of this from Godown?
+              </Text>
+            </TouchableOpacity>
+            {godownNCChecked && (
+              <Text style={styles.splitPreviewText}>
+                Office NC: {(parseInt(totalNC, 10) || 0) - (parseInt(godownNCSplit, 10) || 0)}, Godown NC: {parseInt(godownNCSplit, 10) || 0}
+              </Text>
             )}
           </>
         )}
@@ -830,7 +1105,89 @@ export default function StockScreen() {
     );
   };
 
-  // ─── Render Step 2: Summary ─────────────────────────────────────────────────
+  // ─── Render: Godown Refill Split Modal ─────────────────────────────────────
+
+  const renderRefillSplitModal = () => (
+    <Modal
+      visible={refillSplitModalVisible}
+      transparent
+      animationType="fade"
+      onRequestClose={cancelRefillSplitModal}
+    >
+      <View style={styles.modalOverlay}>
+        <View style={styles.smallModalCard}>
+          <Text style={styles.modalTitle}>Record Godown Refill Delivery, if any?</Text>
+          <TextInput
+            style={[styles.input, { marginTop: 12 }]}
+            placeholder="0"
+            keyboardType="numeric"
+            value={tempRefillSplitInput}
+            onChangeText={setTempRefillSplitInput}
+            autoFocus
+          />
+          <Text style={styles.hintText}>
+            Between 0 and {parseInt(totalRefill, 10) || 0}
+          </Text>
+          <View style={styles.modalButtons}>
+            <TouchableOpacity
+              style={styles.modalCancelButton}
+              onPress={cancelRefillSplitModal}
+            >
+              <Text style={styles.modalCancelText}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.modalConfirmButton}
+              onPress={confirmRefillSplit}
+            >
+              <Text style={styles.modalConfirmText}>Confirm</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+
+  const renderNCSplitModal = () => (
+    <Modal
+      visible={ncSplitModalVisible}
+      transparent
+      animationType="fade"
+      onRequestClose={cancelNCSplitModal}
+    >
+      <View style={styles.modalOverlay}>
+        <View style={styles.smallModalCard}>
+          <Text style={styles.modalTitle}>Record Godown NC, if any?</Text>
+          <TextInput
+            style={[styles.input, { marginTop: 12 }]}
+            placeholder="0"
+            keyboardType="numeric"
+            value={tempNCSplitInput}
+            onChangeText={setTempNCSplitInput}
+            autoFocus
+          />
+          <Text style={styles.hintText}>
+            Between 0 and {parseInt(totalNC, 10) || 0}
+          </Text>
+          <View style={styles.modalButtons}>
+            <TouchableOpacity
+              style={styles.modalCancelButton}
+              onPress={cancelNCSplitModal}
+            >
+              <Text style={styles.modalCancelText}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.modalConfirmButton}
+              onPress={confirmNCSplit}
+            >
+              <Text style={styles.modalConfirmText}>Confirm</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+
+  // ─── Render: Step 2 Summary ───────────────────────────────────────────────
 
   const renderStep2 = () => {
     if (currentStep < 2) return null;
@@ -855,12 +1212,13 @@ export default function StockScreen() {
               large
               color={stock142.closing_full < 0 ? '#e74c3c' : BPCL_BLUE}
             />
-
             <View style={styles.divider} />
-
             <Text style={styles.subSectionTitle}>🔵 Empty Cylinders</Text>
             <CalcRow label="Opening Empty:" value={stock142.opening_empty} />
-            <CalcRow label="+ Empty Received:" value={stock142.total_refill} />
+            <CalcRow
+              label="+ Empty Received:"
+              value={stock142.total_empty_received}
+            />
             <CalcRow
               label="- Sent to Plant:"
               value={parseInt(emptyToPlant142, 10) || 0}
@@ -872,14 +1230,13 @@ export default function StockScreen() {
               large
               color={stock142.closing_empty < 0 ? '#e74c3c' : BPCL_BLUE}
             />
-
             <View style={styles.divider} />
             <Text style={styles.subSectionTitle}>📊 Reconciliation</Text>
             <CalcRow label="Total NC:" value={stock142.total_nc} />
             <CalcRow label="Total DBC:" value={stock142.total_dbc} />
-            <CalcRow label="Total TV (Extra Empty):" value={stock142.total_tv} />
+            <CalcRow label="Total TV (Missing Empty):" value={stock142.total_tv} />
             <CalcRow
-              label="Total TV Out (Missing Empty):"
+              label="Total TV Out (Extra Empty):"
               value={stock142.total_tv_out}
             />
           </>
@@ -894,10 +1251,6 @@ export default function StockScreen() {
               value={parseInt(receivedFromPlant19, 10) || 0}
             />
             <CalcRow label="- Delivered:" value={stock19.cylinder_delivered} />
-            <CalcRow
-              label="- New Connections:"
-              value={parseInt(newConnection19, 10) || 0}
-            />
             <View style={styles.divider} />
             <CalcRow
               label="Closing Full:"
@@ -905,11 +1258,14 @@ export default function StockScreen() {
               large
               color={stock19.closing_full < 0 ? '#e74c3c' : BPCL_BLUE}
             />
-
             <View style={styles.divider} />
             <Text style={styles.subSectionTitle}>🔵 Empty Cylinders</Text>
             <CalcRow label="Opening Empty:" value={stock19.opening_empty} />
             <CalcRow label="+ Empty Received:" value={stock19.empty_received} />
+            <CalcRow
+              label="- Sent to Plant:"
+              value={parseInt(emptyToPlant19, 10) || 0}
+            />
             <View style={styles.divider} />
             <CalcRow
               label="Closing Empty:"
@@ -920,70 +1276,88 @@ export default function StockScreen() {
           </>
         )}
 
-        {selectedProduct === '5 KG - Godown' && stockGodown && (
+        {selectedProduct === '5 KG Cylinder' && stockGodown && stockOffice && (
           <>
-            <Text style={styles.subSectionTitle}>📦 Godown Full Cylinders</Text>
-            <CalcRow label="Opening Full:" value={stockGodown.opening_full} />
-            <CalcRow
-              label="+ From BPCL:"
-              value={parseInt(receivedFromPlantGodown, 10) || 0}
-            />
-            <View style={styles.divider} />
-            <CalcRow
-              label="Current Full:"
-              value={
-                stockGodown.opening_full + (parseInt(receivedFromPlantGodown, 10) || 0)
-              }
-              large
-              color={BPCL_BLUE}
-            />
+            {(() => {
+              const fromBpcl = parseInt(receivedFromPlantGodown, 10) || 0;
+              const emptyToPlant = parseInt(emptyToPlantGodown, 10) || 0;
+              const totalRefillNum = parseInt(totalRefill, 10) || 0;
+              const totalNCNum = parseInt(totalNC, 10) || 0;
+              const godownRefillY = parseInt(godownRefillSplit, 10) || 0;
+              const godownNCY = parseInt(godownNCSplit, 10) || 0;
+              const officeRefillPortion = totalRefillNum - godownRefillY;
+              const officeNCPortion = totalNCNum - godownNCY;
 
-            <View style={styles.divider} />
-            <Text style={styles.subSectionTitle}>🔵 Godown Empty Cylinders</Text>
-            <CalcRow label="Opening Empty:" value={stockGodown.opening_empty} />
-          </>
-        )}
+              const baseGodownFull =
+                stockGodown.opening_full + fromBpcl - godownRefillY - godownNCY;
+              // All refill empties (Office + Godown portion) return to Godown.
+              const baseGodownEmpty =
+                stockGodown.opening_empty - emptyToPlant + totalRefillNum;
+              const baseOfficeFull =
+                stockOffice.opening_full - officeRefillPortion - officeNCPortion;
+              const baseOfficeEmpty = stockOffice.opening_empty;
 
-        {selectedProduct === '5 KG - Office' && stockOffice && (
-          <>
-            <Text style={styles.subSectionTitle}>📦 Office Full Cylinders</Text>
-            <CalcRow label="Opening Full:" value={stockOffice.opening_full} />
-            <CalcRow
-              label="- Refill:"
-              value={parseInt(officeRefill, 10) || 0}
-            />
-            <CalcRow
-              label="- New Connections:"
-              value={parseInt(officeNC, 10) || 0}
-            />
-            <View style={styles.divider} />
-            <CalcRow
-              label="Closing Full:"
-              value={stockOffice.closing_full}
-              large
-              color={stockOffice.closing_full < 0 ? '#e74c3c' : BPCL_BLUE}
-            />
+              return (
+                <>
+                  <Text style={styles.subSectionTitle}>🏭 Godown</Text>
+                  <CalcRow label="Opening Full:" value={stockGodown.opening_full} />
+                  <CalcRow label="+ From BPCL:" value={fromBpcl} />
+                  <CalcRow label="- Godown Refill:" value={godownRefillY} />
+                  <CalcRow label="- Godown NC:" value={godownNCY} />
+                  <Text style={styles.noteText}>
+                    * Transfer impact will be applied in next step
+                  </Text>
+                  <View style={styles.divider} />
+                  <CalcRow
+                    label="Base Godown Full:"
+                    value={baseGodownFull}
+                    large
+                    color={baseGodownFull < 0 ? '#e74c3c' : BPCL_BLUE}
+                  />
+                  <CalcRow label="Opening Empty:" value={stockGodown.opening_empty} />
+                  <CalcRow label="- Sent to Plant:" value={emptyToPlant} />
+                  <CalcRow label="+ Refill Return (all, Office + Godown):" value={totalRefillNum} />
+                  <CalcRow
+                    label="Base Godown Empty:"
+                    value={baseGodownEmpty}
+                    large
+                    color={BPCL_BLUE}
+                  />
 
-            <View style={styles.divider} />
-            <Text style={styles.subSectionTitle}>🔵 Office Empty Cylinders</Text>
-            <CalcRow label="Opening Empty:" value={stockOffice.opening_empty} />
-            <CalcRow
-              label="+ Empty Received:"
-              value={parseInt(officeEmptyReceived, 10) || 0}
-            />
-            <View style={styles.divider} />
-            <CalcRow
-              label="Closing Empty:"
-              value={stockOffice.closing_empty}
-              large
-              color={stockOffice.closing_empty < 0 ? '#e74c3c' : BPCL_BLUE}
-            />
+                  <View style={styles.divider} />
+                  <Text style={styles.subSectionTitle}>🏢 Office</Text>
+                  <CalcRow label="Opening Full:" value={stockOffice.opening_full} />
+                  <CalcRow label="- Office Refill:" value={officeRefillPortion} />
+                  <CalcRow label="- Office NC:" value={officeNCPortion} />
+                  <Text style={styles.noteText}>
+                    * Transfer impact will be applied in next step
+                  </Text>
+                  <View style={styles.divider} />
+                  <CalcRow
+                    label="Base Office Full:"
+                    value={baseOfficeFull}
+                    large
+                    color={baseOfficeFull < 0 ? '#e74c3c' : BPCL_BLUE}
+                  />
+                  <CalcRow label="Opening Empty:" value={stockOffice.opening_empty} />
+                  <Text style={styles.noteText}>
+                    * Refill empty returns go to Godown, not Office
+                  </Text>
+                  <CalcRow
+                    label="Base Office Empty:"
+                    value={baseOfficeEmpty}
+                    large
+                    color={BPCL_BLUE}
+                  />
+                </>
+              );
+            })()}
           </>
         )}
 
         <TouchableOpacity
           style={styles.nextButton}
-          onPress={() => setCurrentStep(3)}
+          onPress={() => setCurrentStep(is5KG ? 3 : getBorrowStep())}
         >
           <Text style={styles.nextButtonText}>Next</Text>
           <Ionicons name="arrow-forward" size={20} color="#fff" />
@@ -992,18 +1366,19 @@ export default function StockScreen() {
     );
   };
 
-  // ─── Render Step 3: Transfer (5KG Only) ────────────────────────────────────
+  // ─── Render: Step 3 Transfer (5KG Only) ──────────────────────────────────
 
   const renderStep3Transfer = () => {
-    if (currentStep < 3) return null;
-    if (
-      selectedProduct !== '5 KG - Godown' &&
-      selectedProduct !== '5 KG - Office'
-    )
-      return null;
+    if (currentStep < 3 || !is5KG) return null;
 
-    const { godownFullDelta, godownEmptyDelta, officeFullDelta, officeEmptyDelta } =
-      calcTransferImpact();
+    const {
+      godownFullDelta,
+      godownEmptyDelta,
+      officeFullDelta,
+      officeEmptyDelta,
+    } = calcTransferImpact();
+
+    const calc = get5KGCalculations();
 
     return (
       <View style={styles.card}>
@@ -1018,91 +1393,62 @@ export default function StockScreen() {
               </TouchableOpacity>
             </View>
 
-            {/* Type Toggle */}
             <Text style={styles.label}>Cylinder Type</Text>
             <View style={styles.toggleRow}>
-              <TouchableOpacity
-                style={[
-                  styles.toggleButton,
-                  transfer.type === 'full' && styles.toggleButtonSelected,
-                ]}
-                onPress={() => updateTransfer(index, 'type', 'full')}
-              >
-                <Text
+              {(['full', 'empty'] as const).map((type) => (
+                <TouchableOpacity
+                  key={type}
                   style={[
-                    styles.toggleButtonText,
-                    transfer.type === 'full' && styles.toggleButtonTextSelected,
+                    styles.toggleButton,
+                    transfer.type === type && styles.toggleButtonSelected,
                   ]}
+                  onPress={() => updateTransfer(index, 'type', type)}
                 >
-                  Full
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.toggleButton,
-                  transfer.type === 'empty' && styles.toggleButtonSelected,
-                ]}
-                onPress={() => updateTransfer(index, 'type', 'empty')}
-              >
-                <Text
-                  style={[
-                    styles.toggleButtonText,
-                    transfer.type === 'empty' && styles.toggleButtonTextSelected,
-                  ]}
-                >
-                  Empty
-                </Text>
-              </TouchableOpacity>
+                  <Text
+                    style={[
+                      styles.toggleButtonText,
+                      transfer.type === type && styles.toggleButtonTextSelected,
+                    ]}
+                  >
+                    {type.charAt(0).toUpperCase() + type.slice(1)}
+                  </Text>
+                </TouchableOpacity>
+              ))}
             </View>
 
-            {/* Direction Toggle */}
             <Text style={[styles.label, { marginTop: 12 }]}>Direction</Text>
             <View style={styles.toggleRow}>
-              <TouchableOpacity
-                style={[
-                  styles.toggleButton,
-                  styles.toggleButtonWide,
-                  transfer.direction === 'godown_to_office' &&
-                    styles.toggleButtonSelected,
-                ]}
-                onPress={() =>
-                  updateTransfer(index, 'direction', 'godown_to_office')
-                }
-              >
-                <Text
+              {(
+                [
+                  { value: 'godown_to_office', label: 'Godown → Office' },
+                  { value: 'office_to_godown', label: 'Office → Godown' },
+                ] as const
+              ).map((dir) => (
+                <TouchableOpacity
+                  key={dir.value}
                   style={[
-                    styles.toggleButtonText,
-                    transfer.direction === 'godown_to_office' &&
-                      styles.toggleButtonTextSelected,
+                    styles.toggleButton,
+                    styles.toggleButtonWide,
+                    transfer.direction === dir.value &&
+                      styles.toggleButtonSelected,
                   ]}
+                  onPress={() =>
+                    updateTransfer(index, 'direction', dir.value)
+                  }
                 >
-                  Godown → Office
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.toggleButton,
-                  styles.toggleButtonWide,
-                  transfer.direction === 'office_to_godown' &&
-                    styles.toggleButtonSelected,
-                ]}
-                onPress={() =>
-                  updateTransfer(index, 'direction', 'office_to_godown')
-                }
-              >
-                <Text
-                  style={[
-                    styles.toggleButtonText,
-                    transfer.direction === 'office_to_godown' &&
-                      styles.toggleButtonTextSelected,
-                  ]}
-                >
-                  Office → Godown
-                </Text>
-              </TouchableOpacity>
+                  <Text
+                    style={[
+                      styles.toggleButtonText,
+                      transfer.direction === dir.value &&
+                        styles.toggleButtonTextSelected,
+                    ]}
+                  >
+                    {dir.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
             </View>
 
-            {/* Quantity */}
             <Text style={[styles.label, { marginTop: 12 }]}>Quantity</Text>
             <TextInput
               style={styles.input}
@@ -1114,56 +1460,61 @@ export default function StockScreen() {
           </View>
         ))}
 
-        {/* Transfer Impact Preview */}
         {transfers.length > 0 && (
           <View style={styles.impactCard}>
             <Text style={styles.impactTitle}>Transfer Impact</Text>
+            {[
+              { label: 'Godown Full:', value: godownFullDelta },
+              { label: 'Godown Empty:', value: godownEmptyDelta },
+              { label: 'Office Full:', value: officeFullDelta },
+              { label: 'Office Empty:', value: officeEmptyDelta },
+            ].map((item) => (
+              <View key={item.label} style={styles.impactRow}>
+                <Text style={styles.impactLabel}>{item.label}</Text>
+                <Text
+                  style={[
+                    styles.impactValue,
+                    { color: item.value >= 0 ? '#27ae60' : '#e74c3c' },
+                  ]}
+                >
+                  {item.value >= 0 ? '+' : ''}
+                  {item.value}
+                </Text>
+              </View>
+            ))}
+            <View style={styles.divider} />
             <View style={styles.impactRow}>
-              <Text style={styles.impactLabel}>Godown Full:</Text>
+              <Text style={[styles.impactLabel, { fontWeight: 'bold' }]}>
+                Godown Closing Full / Empty:
+              </Text>
               <Text
                 style={[
                   styles.impactValue,
-                  { color: godownFullDelta >= 0 ? '#27ae60' : '#e74c3c' },
+                  {
+                    fontWeight: 'bold',
+                    color:
+                      calc.godownClosingFull < 0 ? '#e74c3c' : BPCL_BLUE,
+                  },
                 ]}
               >
-                {godownFullDelta >= 0 ? '+' : ''}
-                {godownFullDelta}
+                {calc.godownClosingFull} / {calc.godownClosingEmpty}
               </Text>
             </View>
             <View style={styles.impactRow}>
-              <Text style={styles.impactLabel}>Godown Empty:</Text>
-              <Text
-                style={[
-                  styles.impactValue,
-                  { color: godownEmptyDelta >= 0 ? '#27ae60' : '#e74c3c' },
-                ]}
-              >
-                {godownEmptyDelta >= 0 ? '+' : ''}
-                {godownEmptyDelta}
+              <Text style={[styles.impactLabel, { fontWeight: 'bold' }]}>
+                Office Closing Full / Empty:
               </Text>
-            </View>
-            <View style={styles.impactRow}>
-              <Text style={styles.impactLabel}>Office Full:</Text>
               <Text
                 style={[
                   styles.impactValue,
-                  { color: officeFullDelta >= 0 ? '#27ae60' : '#e74c3c' },
+                  {
+                    fontWeight: 'bold',
+                    color:
+                      calc.officeClosingFull < 0 ? '#e74c3c' : BPCL_BLUE,
+                  },
                 ]}
               >
-                {officeFullDelta >= 0 ? '+' : ''}
-                {officeFullDelta}
-              </Text>
-            </View>
-            <View style={styles.impactRow}>
-              <Text style={styles.impactLabel}>Office Empty:</Text>
-              <Text
-                style={[
-                  styles.impactValue,
-                  { color: officeEmptyDelta >= 0 ? '#27ae60' : '#e74c3c' },
-                ]}
-              >
-                {officeEmptyDelta >= 0 ? '+' : ''}
-                {officeEmptyDelta}
+                {calc.officeClosingFull} / {calc.officeClosingEmpty}
               </Text>
             </View>
           </View>
@@ -1182,7 +1533,7 @@ export default function StockScreen() {
             <Text style={styles.skipButtonText}>Skip</Text>
           </TouchableOpacity>
           <TouchableOpacity
-            style={styles.nextButton}
+            style={[styles.nextButton, { flex: 2 }]}
             onPress={() => setCurrentStep(4)}
           >
             <Text style={styles.nextButtonText}>Next</Text>
@@ -1193,24 +1544,26 @@ export default function StockScreen() {
     );
   };
 
-  // ─── Render Borrow/Give Step ────────────────────────────────────────────────
-
-  const getBorrowStep = () => {
-    if (
-      selectedProduct === '5 KG - Godown' ||
-      selectedProduct === '5 KG - Office'
-    )
-      return 4;
-    return 3;
-  };
+  // ─── Render: Borrow/Give Step ─────────────────────────────────────────────
 
   const renderBorrowStep = () => {
     const borrowStep = getBorrowStep();
     if (currentStep < borrowStep) return null;
 
+    const single = !is5KG ? getFinalCalculations() : null;
+    const combined = is5KG ? get5KGCalculations() : null;
+
     return (
       <View style={styles.card}>
-        <StepHeader step={borrowStep} title="Borrow / Give Cylinders (Optional)" />
+        <StepHeader
+          step={borrowStep}
+          title="Borrow / Give Cylinders (Optional)"
+        />
+        {is5KG && (
+          <Text style={styles.hintText}>
+            Applies to Office stock (customer-facing borrow/give)
+          </Text>
+        )}
 
         {borrowEntries.map((entry, index) => (
           <View key={`borrow-${index}`} style={styles.borrowCard}>
@@ -1237,13 +1590,11 @@ export default function StockScreen() {
                 <TextInput
                   style={styles.input}
                   placeholder="+/- 0"
-                  keyboardType="numeric"
+                  keyboardType="numbers-and-punctuation"
                   value={entry.full_qty}
                   onChangeText={(v) => updateBorrowEntry(index, 'full_qty', v)}
                 />
-                <Text style={styles.hintText}>
-                  + Borrowed / - Given
-                </Text>
+                <Text style={styles.hintText}>+ Borrowed / - Given</Text>
               </View>
 
               <View style={styles.halfInput}>
@@ -1253,25 +1604,80 @@ export default function StockScreen() {
                 <TextInput
                   style={styles.input}
                   placeholder="+/- 0"
-                  keyboardType="numeric"
+                  keyboardType="numbers-and-punctuation"
                   value={entry.empty_qty}
-                  onChangeText={(v) => updateBorrowEntry(index, 'empty_qty', v)}
+                  onChangeText={(v) =>
+                    updateBorrowEntry(index, 'empty_qty', v)
+                  }
                 />
-                <Text style={styles.hintText}>
-                  + Borrowed / - Given
-                </Text>
+                <Text style={styles.hintText}>+ Borrowed / - Given</Text>
               </View>
             </View>
           </View>
         ))}
 
-        {/* Remarks Preview */}
-        {borrowEntries.length > 0 && buildRemarksString(borrowEntries) && (
+        {borrowEntries.length > 0 && buildRemarksString(borrowEntries) ? (
           <View style={styles.remarksPreview}>
             <Text style={styles.remarksPreviewLabel}>Remarks Preview:</Text>
             <Text style={styles.remarksPreviewText}>
               {buildRemarksString(borrowEntries)}
             </Text>
+          </View>
+        ) : null}
+
+        {borrowEntries.length > 0 && single && (
+          <View style={styles.finalPreviewCard}>
+            <Text style={styles.finalPreviewTitle}>
+              Final Stock (After Borrow/Give)
+            </Text>
+            <View style={styles.impactRow}>
+              <Text style={styles.impactLabel}>Closing Full:</Text>
+              <Text
+                style={[
+                  styles.impactValue,
+                  {
+                    fontWeight: 'bold',
+                    color: single.closingFull < 0 ? '#e74c3c' : BPCL_BLUE,
+                  },
+                ]}
+              >
+                {single.closingFull}
+              </Text>
+            </View>
+            <View style={styles.impactRow}>
+              <Text style={styles.impactLabel}>Closing Empty:</Text>
+              <Text
+                style={[
+                  styles.impactValue,
+                  {
+                    fontWeight: 'bold',
+                    color: single.closingEmpty < 0 ? '#e74c3c' : BPCL_BLUE,
+                  },
+                ]}
+              >
+                {single.closingEmpty}
+              </Text>
+            </View>
+          </View>
+        )}
+
+        {borrowEntries.length > 0 && combined && (
+          <View style={styles.finalPreviewCard}>
+            <Text style={styles.finalPreviewTitle}>
+              Final Stock (After Borrow/Give)
+            </Text>
+            <View style={styles.impactRow}>
+              <Text style={styles.impactLabel}>Godown Full / Empty:</Text>
+              <Text style={[styles.impactValue, { fontWeight: 'bold', color: BPCL_BLUE }]}>
+                {combined.godownClosingFull} / {combined.godownClosingEmpty}
+              </Text>
+            </View>
+            <View style={styles.impactRow}>
+              <Text style={styles.impactLabel}>Office Full / Empty:</Text>
+              <Text style={[styles.impactValue, { fontWeight: 'bold', color: BPCL_BLUE }]}>
+                {combined.officeClosingFull} / {combined.officeClosingEmpty}
+              </Text>
+            </View>
           </View>
         )}
 
@@ -1291,7 +1697,7 @@ export default function StockScreen() {
             <Text style={styles.skipButtonText}>Skip & Confirm</Text>
           </TouchableOpacity>
           <TouchableOpacity
-            style={styles.nextButton}
+            style={[styles.nextButton, { flex: 2 }]}
             onPress={() => setShowConfirmModal(true)}
           >
             <Text style={styles.nextButtonText}>Review & Save</Text>
@@ -1302,11 +1708,46 @@ export default function StockScreen() {
     );
   };
 
-  // ─── Confirm Modal ─────────────────────────────────────────────────────────
+  // ─── Render: Confirm Modal ────────────────────────────────────────────────
 
   const renderConfirmModal = () => {
-    const { closingFull, closingEmpty, remarks, borrowedFull, borrowedEmpty } =
-      getFinalNumbers();
+    const single = !is5KG ? getFinalCalculations() : null;
+    const combined = is5KG ? get5KGCalculations() : null;
+    const borrowedFull = calcBorrowedFull(borrowEntries);
+    const borrowedEmpty = calcBorrowedEmpty(borrowEntries);
+    const remarks = is5KG ? combined?.remarks : single?.remarks;
+
+    const ModalRow = ({
+      label,
+      value,
+      color,
+    }: {
+      label: string;
+      value: string | number;
+      color?: string;
+    }) => (
+      <View style={styles.modalRow}>
+        <Text style={styles.modalLabel}>{label}</Text>
+        <Text style={[styles.modalValue, color ? { color } : {}]}>{value}</Text>
+      </View>
+    );
+
+    const ModalRowFinal = ({
+      label,
+      value,
+      color,
+    }: {
+      label: string;
+      value: number;
+      color?: string;
+    }) => (
+      <View style={[styles.modalRow, styles.modalRowFinal]}>
+        <Text style={styles.modalLabelBold}>{label}</Text>
+        <Text style={[styles.modalValueBold, color ? { color } : {}]}>
+          {value}
+        </Text>
+      </View>
+    );
 
     return (
       <Modal
@@ -1322,145 +1763,196 @@ export default function StockScreen() {
                 <Ionicons name="checkmark-circle" size={40} color={BPCL_BLUE} />
                 <Text style={styles.modalTitle}>Confirm Stock Entry</Text>
                 <Text style={styles.modalSubtitle}>{selectedProduct}</Text>
+                {/* Uses the dynamic TODAY state variable */}
+                <Text style={styles.modalDate}>Date: {TODAY}</Text>
               </View>
 
-              <View style={styles.modalSection}>
-                <Text style={styles.modalSectionTitle}>📦 Full Cylinders</Text>
+              {!is5KG && (
+                <>
+                  <View style={styles.modalSection}>
+                    <Text style={styles.modalSectionTitle}>📦 Full Cylinders</Text>
 
-                {selectedProduct === '14.2 KG Cylinder' && stock142 && (
-                  <>
-                    <View style={styles.modalRow}>
-                      <Text style={styles.modalLabel}>Opening Full:</Text>
-                      <Text style={styles.modalValue}>{stock142.opening_full}</Text>
-                    </View>
-                    <View style={styles.modalRow}>
-                      <Text style={styles.modalLabel}>+ Received from Plant:</Text>
-                      <Text style={styles.modalValue}>
-                        {parseInt(receivedFromPlant142, 10) || 0}
-                      </Text>
-                    </View>
-                    <View style={styles.modalRow}>
-                      <Text style={styles.modalLabel}>- Delivered:</Text>
-                      <Text style={styles.modalValue}>{stock142.total_refill}</Text>
-                    </View>
-                  </>
-                )}
+                    {selectedProduct === '14.2 KG Cylinder' && stock142 && (
+                      <>
+                        <ModalRow label="Opening Full:" value={stock142.opening_full} />
+                        <ModalRow
+                          label="+ Received from Plant:"
+                          value={parseInt(receivedFromPlant142, 10) || 0}
+                        />
+                        <ModalRow label="- Delivered:" value={stock142.total_refill} />
+                      </>
+                    )}
 
-                {selectedProduct === '19 KG Cylinder' && stock19 && (
-                  <>
-                    <View style={styles.modalRow}>
-                      <Text style={styles.modalLabel}>Opening Full:</Text>
-                      <Text style={styles.modalValue}>{stock19.opening_full}</Text>
-                    </View>
-                    <View style={styles.modalRow}>
-                      <Text style={styles.modalLabel}>+ From BPCL:</Text>
-                      <Text style={styles.modalValue}>
-                        {parseInt(receivedFromPlant19, 10) || 0}
-                      </Text>
-                    </View>
-                    <View style={styles.modalRow}>
-                      <Text style={styles.modalLabel}>- Delivered:</Text>
-                      <Text style={styles.modalValue}>{stock19.cylinder_delivered}</Text>
-                    </View>
-                    <View style={styles.modalRow}>
-                      <Text style={styles.modalLabel}>- New Connections:</Text>
-                      <Text style={styles.modalValue}>
-                        {parseInt(newConnection19, 10) || 0}
-                      </Text>
-                    </View>
-                  </>
-                )}
+                    {selectedProduct === '19 KG Cylinder' && stock19 && (
+                      <>
+                        <ModalRow label="Opening Full:" value={stock19.opening_full} />
+                        <ModalRow
+                          label="+ From BPCL:"
+                          value={parseInt(receivedFromPlant19, 10) || 0}
+                        />
+                        <ModalRow
+                          label="- Delivered:"
+                          value={stock19.cylinder_delivered}
+                        />
+                      </>
+                    )}
 
-                {borrowedFull !== 0 && (
-                  <View style={styles.modalRow}>
-                    <Text style={styles.modalLabel}>± Borrow/Give Full:</Text>
-                    <Text
-                      style={[
-                        styles.modalValue,
-                        { color: borrowedFull > 0 ? '#27ae60' : '#e74c3c' },
-                      ]}
-                    >
-                      {borrowedFull > 0 ? '+' : ''}
-                      {borrowedFull}
-                    </Text>
+                    {borrowedFull !== 0 && (
+                      <ModalRow
+                        label="± Borrow/Give Full:"
+                        value={`${borrowedFull > 0 ? '+' : ''}${borrowedFull}`}
+                        color={borrowedFull > 0 ? '#27ae60' : '#e74c3c'}
+                      />
+                    )}
+
+                    {single && (
+                      <ModalRowFinal
+                        label="Closing Full:"
+                        value={single.closingFull}
+                        color={single.closingFull < 0 ? '#e74c3c' : BPCL_BLUE}
+                      />
+                    )}
                   </View>
-                )}
 
-                <View style={[styles.modalRow, styles.modalRowFinal]}>
-                  <Text style={styles.modalLabelBold}>Closing Full:</Text>
-                  <Text
-                    style={[
-                      styles.modalValueBold,
-                      { color: closingFull < 0 ? '#e74c3c' : BPCL_BLUE },
-                    ]}
-                  >
-                    {closingFull}
-                  </Text>
-                </View>
-              </View>
+                  <View style={styles.modalSection}>
+                    <Text style={styles.modalSectionTitle}>🔵 Empty Cylinders</Text>
 
-              <View style={styles.modalSection}>
-                <Text style={styles.modalSectionTitle}>🔵 Empty Cylinders</Text>
+                    {selectedProduct === '14.2 KG Cylinder' && stock142 && (
+                      <>
+                        <ModalRow label="Opening Empty:" value={stock142.opening_empty} />
+                        <ModalRow
+                          label="+ Empty Received:"
+                          value={stock142.total_empty_received}
+                        />
+                        <ModalRow
+                          label="- Sent to Plant:"
+                          value={parseInt(emptyToPlant142, 10) || 0}
+                        />
+                      </>
+                    )}
 
-                {selectedProduct === '14.2 KG Cylinder' && stock142 && (
-                  <>
-                    <View style={styles.modalRow}>
-                      <Text style={styles.modalLabel}>Opening Empty:</Text>
-                      <Text style={styles.modalValue}>{stock142.opening_empty}</Text>
-                    </View>
-                    <View style={styles.modalRow}>
-                      <Text style={styles.modalLabel}>+ Empty Received:</Text>
-                      <Text style={styles.modalValue}>{stock142.total_refill}</Text>
-                    </View>
-                    <View style={styles.modalRow}>
-                      <Text style={styles.modalLabel}>- Sent to Plant:</Text>
-                      <Text style={styles.modalValue}>
-                        {parseInt(emptyToPlant142, 10) || 0}
-                      </Text>
-                    </View>
-                  </>
-                )}
+                    {selectedProduct === '19 KG Cylinder' && stock19 && (
+                      <>
+                        <ModalRow label="Opening Empty:" value={stock19.opening_empty} />
+                        <ModalRow
+                          label="+ Empty Received:"
+                          value={stock19.empty_received}
+                        />
+                        <ModalRow
+                          label="- Sent to Plant:"
+                          value={parseInt(emptyToPlant19, 10) || 0}
+                        />
+                      </>
+                    )}
 
-                {selectedProduct === '19 KG Cylinder' && stock19 && (
-                  <>
-                    <View style={styles.modalRow}>
-                      <Text style={styles.modalLabel}>Opening Empty:</Text>
-                      <Text style={styles.modalValue}>{stock19.opening_empty}</Text>
-                    </View>
-                    <View style={styles.modalRow}>
-                      <Text style={styles.modalLabel}>+ Empty Received:</Text>
-                      <Text style={styles.modalValue}>{stock19.empty_received}</Text>
-                    </View>
-                  </>
-                )}
+                    {borrowedEmpty !== 0 && (
+                      <ModalRow
+                        label="± Borrow/Give Empty:"
+                        value={`${borrowedEmpty > 0 ? '+' : ''}${borrowedEmpty}`}
+                        color={borrowedEmpty > 0 ? '#27ae60' : '#e74c3c'}
+                      />
+                    )}
 
-                {borrowedEmpty !== 0 && (
-                  <View style={styles.modalRow}>
-                    <Text style={styles.modalLabel}>± Borrow/Give Empty:</Text>
-                    <Text
-                      style={[
-                        styles.modalValue,
-                        { color: borrowedEmpty > 0 ? '#27ae60' : '#e74c3c' },
-                      ]}
-                    >
-                      {borrowedEmpty > 0 ? '+' : ''}
-                      {borrowedEmpty}
-                    </Text>
+                    {single && (
+                      <ModalRowFinal
+                        label="Closing Empty:"
+                        value={single.closingEmpty}
+                        color={single.closingEmpty < 0 ? '#e74c3c' : BPCL_BLUE}
+                      />
+                    )}
                   </View>
-                )}
+                </>
+              )}
 
-                <View style={[styles.modalRow, styles.modalRowFinal]}>
-                  <Text style={styles.modalLabelBold}>Closing Empty:</Text>
-                  <Text
-                    style={[
-                      styles.modalValueBold,
-                      { color: closingEmpty < 0 ? '#e74c3c' : BPCL_BLUE },
-                    ]}
-                  >
-                    {closingEmpty}
-                  </Text>
-                </View>
-              </View>
+              {is5KG && stockGodown && stockOffice && combined && (
+                <>
+                  <View style={styles.modalSection}>
+                    <Text style={styles.modalSectionTitle}>🏭 Godown</Text>
+                    <ModalRow label="Opening Full:" value={stockGodown.opening_full} />
+                    <ModalRow
+                      label="+ From BPCL:"
+                      value={parseInt(receivedFromPlantGodown, 10) || 0}
+                    />
+                    <ModalRow
+                      label="- Sent to Office:"
+                      value={transfers
+                        .filter((t) => t.direction === 'godown_to_office' && t.type === 'full')
+                        .reduce((sum, t) => sum + (parseInt(t.quantity, 10) || 0), 0)}
+                    />
+                    <ModalRow label="- Godown Refill:" value={combined.godownRefillSplitVal} />
+                    <ModalRow label="- Godown NC:" value={combined.godownNCSplitVal} />
+                    <ModalRowFinal
+                      label="Godown Closing Full:"
+                      value={combined.godownClosingFull}
+                      color={combined.godownClosingFull < 0 ? '#e74c3c' : BPCL_BLUE}
+                    />
+                    <ModalRow label="Opening Empty:" value={stockGodown.opening_empty} />
+                    <ModalRow
+                      label="- Sent to Plant:"
+                      value={parseInt(emptyToPlantGodown, 10) || 0}
+                    />
+                    <ModalRow
+                      label="+ Received from Office:"
+                      value={transfers
+                        .filter((t) => t.direction === 'office_to_godown' && t.type === 'empty')
+                        .reduce((sum, t) => sum + (parseInt(t.quantity, 10) || 0), 0)}
+                    />
+                    <ModalRow
+                      label="+ Refill Return (all, Office + Godown):"
+                      value={combined.officeRefillPortion + combined.godownRefillSplitVal}
+                    />
+                    <ModalRowFinal
+                      label="Godown Closing Empty:"
+                      value={combined.godownClosingEmpty}
+                      color={BPCL_BLUE}
+                    />
+                  </View>
+
+                  <View style={styles.modalSection}>
+                    <Text style={styles.modalSectionTitle}>🏢 Office</Text>
+                    <ModalRow label="Opening Full:" value={stockOffice.opening_full} />
+                    <ModalRow
+                      label="+ Received from Godown:"
+                      value={transfers
+                        .filter((t) => t.direction === 'godown_to_office' && t.type === 'full')
+                        .reduce((sum, t) => sum + (parseInt(t.quantity, 10) || 0), 0)}
+                    />
+                    <ModalRow label="- Office Refill:" value={combined.officeRefillPortion} />
+                    <ModalRow label="- Office NC:" value={combined.officeNCPortion} />
+                    {borrowedFull !== 0 && (
+                      <ModalRow
+                        label="± Borrow/Give Full:"
+                        value={`${borrowedFull > 0 ? '+' : ''}${borrowedFull}`}
+                        color={borrowedFull > 0 ? '#27ae60' : '#e74c3c'}
+                      />
+                    )}
+                    <ModalRowFinal
+                      label="Office Closing Full:"
+                      value={combined.officeClosingFull}
+                      color={combined.officeClosingFull < 0 ? '#e74c3c' : BPCL_BLUE}
+                    />
+                    <ModalRow label="Opening Empty:" value={stockOffice.opening_empty} />
+                    <ModalRow
+                      label="- Sent to Godown:"
+                      value={transfers
+                        .filter((t) => t.direction === 'office_to_godown' && t.type === 'empty')
+                        .reduce((sum, t) => sum + (parseInt(t.quantity, 10) || 0), 0)}
+                    />
+                    {borrowedEmpty !== 0 && (
+                      <ModalRow
+                        label="± Borrow/Give Empty:"
+                        value={`${borrowedEmpty > 0 ? '+' : ''}${borrowedEmpty}`}
+                        color={borrowedEmpty > 0 ? '#27ae60' : '#e74c3c'}
+                      />
+                    )}
+                    <ModalRowFinal
+                      label="Office Closing Empty:"
+                      value={combined.officeClosingEmpty}
+                      color={BPCL_BLUE}
+                    />
+                  </View>
+                </>
+              )}
 
               {remarks ? (
                 <View style={styles.modalSection}>
@@ -1477,7 +1969,10 @@ export default function StockScreen() {
                   <Text style={styles.modalCancelText}>Cancel</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
-                  style={[styles.modalConfirmButton, saving && styles.buttonDisabled]}
+                  style={[
+                    styles.modalConfirmButton,
+                    saving && styles.buttonDisabled,
+                  ]}
                   onPress={handleSave}
                   disabled={saving}
                 >
@@ -1495,88 +1990,161 @@ export default function StockScreen() {
     );
   };
 
-  // ─── Main Render ───────────────────────────────────────────────────────────
+  // ─── Main Render ──────────────────────────────────────────────────────────
 
   return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-    >
-      <ScrollView
-        style={styles.scrollView}
-        showsVerticalScrollIndicator={false}
-        keyboardShouldPersistTaps="handled"
-      >
-        {/* ── Dropdown ─────────────────────────────────────────────────────── */}
-        <View style={styles.dropdownSection}>
-          <Text style={styles.label}>Select Product *</Text>
-          <TouchableOpacity
-            style={styles.dropdownButton}
-            onPress={() => setDropdownOpen((prev) => !prev)}
-          >
-            <Text
-              style={[
-                styles.dropdownButtonText,
-                !selectedProduct && styles.dropdownPlaceholder,
-              ]}
+    <View style={styles.container}>
+      {/* ── Blue Header ───────────────────────────────────────────────────── */}
+      <SafeAreaView style={styles.header} edges={['top']}>
+        <View style={styles.headerContent}>
+          <View style={styles.headerTopRow}>
+            <Text style={styles.headerTitle}>Stock Entry</Text>
+            <TouchableOpacity
+              style={styles.refreshButton}
+              onPress={handleRefresh}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
             >
-              {selectedProduct || 'Select a product...'}
+              <Ionicons name="refresh" size={22} color="#fff" />
+            </TouchableOpacity>
+          </View>
+
+          {/* Date picker row — updated pattern */}
+          <TouchableOpacity
+            onPress={() => setShowDatePicker(true)}
+            style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 }}
+          >
+            <Ionicons name="calendar-outline" size={14} color="rgba(255,255,255,0.9)" />
+            <Text style={styles.headerDate}>
+              {format(new Date(selectedDate + 'T00:00:00'), 'dd MMM yyyy')}
             </Text>
-            <Ionicons
-              name={dropdownOpen ? 'chevron-up' : 'chevron-down'}
-              size={20}
-              color={BPCL_BLUE}
-            />
+            <Ionicons name="chevron-down" size={12} color="rgba(255,255,255,0.9)" />
           </TouchableOpacity>
 
-          {dropdownOpen && (
-            <View style={styles.dropdownList}>
-              {(
-                [
-                  '14.2 KG Cylinder',
-                  '19 KG Cylinder',
-                  '5 KG - Godown',
-                  '5 KG - Office',
-                ] as Product[]
-              ).map((product) => (
-                <TouchableOpacity
-                  key={product}
-                  style={[
-                    styles.dropdownItem,
-                    selectedProduct === product && styles.dropdownItemSelected,
-                  ]}
-                  onPress={() => handleProductSelect(product)}
-                >
-                  <Text
-                    style={[
-                      styles.dropdownItemText,
-                      selectedProduct === product &&
-                        styles.dropdownItemTextSelected,
-                    ]}
-                  >
-                    {product}
-                  </Text>
-                  {selectedProduct === product && (
-                    <Ionicons name="checkmark" size={18} color="#fff" />
-                  )}
-                </TouchableOpacity>
-              ))}
-            </View>
+          {showDatePicker && (
+            <DateTimePicker
+              value={new Date(selectedDate + 'T00:00:00')}
+              mode="date"
+              display="default"
+              onChange={(event: any, date?: Date) => {
+                setShowDatePicker(false);
+                if (event.type === 'set' && date) {
+                  setSelectedDate(format(date, 'yyyy-MM-dd'));
+                }
+              }}
+            />
           )}
         </View>
+      </SafeAreaView>
 
-        {/* ── Steps ────────────────────────────────────────────────────────── */}
-        {renderStep1()}
-        {renderStep2()}
-        {renderStep3Transfer()}
-        {renderBorrowStep()}
+      {/* ── Date Picker ───────────────────────────────────────────────────── */}
+      {showDatePicker && (
+        <DateTimePicker
+          value={new Date(selectedDate + 'T00:00:00')}
+          mode="date"
+          display={Platform.OS === 'ios' ? 'inline' : 'default'}
+          maximumDate={new Date()}
+          onChange={handleDateChange}
+          style={Platform.OS === 'ios' ? styles.iosDatePicker : undefined}
+        />
+      )}
 
-        <View style={{ height: 40 }} />
-      </ScrollView>
+      {/* iOS: show a "Done" button to close the inline picker */}
+      {showDatePicker && Platform.OS === 'ios' && (
+        <View style={styles.iosDoneRow}>
+          <TouchableOpacity
+            style={styles.iosDoneButton}
+            onPress={() => setShowDatePicker(false)}
+          >
+            <Text style={styles.iosDoneText}>Done</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* ── Main Content ──────────────────────────────────────────────────── */}
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      >
+        <ScrollView
+          style={styles.scrollView}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+        >
+          {/* ── Dropdown ────────────────────────────────────────────────────── */}
+          <View style={styles.dropdownSection}>
+            <Text style={styles.label}>Select Product *</Text>
+            <TouchableOpacity
+              style={styles.dropdownButton}
+              onPress={() => setDropdownOpen((prev) => !prev)}
+            >
+              <Text
+                style={[
+                  styles.dropdownButtonText,
+                  !selectedProduct && styles.dropdownPlaceholder,
+                ]}
+              >
+                {selectedProduct || 'Select a product...'}
+              </Text>
+              <Ionicons
+                name={dropdownOpen ? 'chevron-up' : 'chevron-down'}
+                size={20}
+                color={BPCL_BLUE}
+              />
+            </TouchableOpacity>
+
+            {dropdownOpen && (
+              <View style={styles.dropdownList}>
+                {(
+                  [
+                    '14.2 KG Cylinder',
+                    '19 KG Cylinder',
+                    '5 KG Cylinder',
+                  ] as Product[]
+                ).map((product) => (
+                  <TouchableOpacity
+                    key={product}
+                    style={[
+                      styles.dropdownItem,
+                      selectedProduct === product &&
+                        styles.dropdownItemSelected,
+                    ]}
+                    onPress={() => handleProductSelect(product)}
+                  >
+                    <Text
+                      style={[
+                        styles.dropdownItemText,
+                        selectedProduct === product &&
+                          styles.dropdownItemTextSelected,
+                      ]}
+                    >
+                      {product}
+                    </Text>
+                    {selectedProduct === product && (
+                      <Ionicons name="checkmark" size={18} color="#fff" />
+                    )}
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
+          </View>
+
+          {/* ── Steps ───────────────────────────────────────────────────────── */}
+          {renderStep1()}
+          {renderStep2()}
+          {renderStep3Transfer()}
+          {renderBorrowStep()}
+
+          <View style={{ height: 40 }} />
+        </ScrollView>
+      </KeyboardAvoidingView>
+
+      {/* ── Split Modals ──────────────────────────────────────────────────── */}
+      {renderRefillSplitModal()}
+      {renderNCSplitModal()}
 
       {/* ── Confirm Modal ─────────────────────────────────────────────────── */}
       {renderConfirmModal()}
-    </KeyboardAvoidingView>
+    </View>
   );
 }
 
@@ -1587,11 +2155,82 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#f5f5f5',
   },
+
+  // ── Blue Header ───────────────────────────────────────────────────────────
+  header: {
+    backgroundColor: BPCL_BLUE,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15,
+    shadowRadius: 4,
+    elevation: 5,
+  },
+  headerContent: {
+    paddingHorizontal: 20,
+    paddingTop: 12,
+    paddingBottom: 16,
+  },
+  headerTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  headerTitle: { fontSize: 22, fontWeight: 'bold', color: '#fff' },
+  headerDate: { fontSize: 14, color: 'rgba(255,255,255,0.9)' },
+  refreshButton: {
+    padding: 6,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+  },
+  datePickerButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 8,
+    alignSelf: 'flex-start',
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: BPCL_YELLOW,
+  },
+  datePickerText: {
+    fontSize: 14,
+    color: BPCL_YELLOW,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+
+  // ── iOS Date Picker ───────────────────────────────────────────────────────
+  iosDatePicker: {
+    backgroundColor: '#fff',
+  },
+  iosDoneRow: {
+    backgroundColor: '#fff',
+    alignItems: 'flex-end',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#eee',
+  },
+  iosDoneButton: {
+    paddingHorizontal: 16,
+    paddingVertical: 6,
+    backgroundColor: BPCL_BLUE,
+    borderRadius: 8,
+  },
+  iosDoneText: {
+    color: '#fff',
+    fontWeight: 'bold',
+    fontSize: 14,
+  },
+
   scrollView: {
     flex: 1,
   },
 
-  // ── Dropdown ────────────────────────────────────────────────────────────────
+  // ── Dropdown ──────────────────────────────────────────────────────────────
   dropdownSection: {
     margin: 16,
     marginBottom: 8,
@@ -1627,6 +2266,7 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
     shadowRadius: 4,
+    zIndex: 999,
   },
   dropdownItem: {
     padding: 14,
@@ -1648,7 +2288,7 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
   },
 
-  // ── Step Header ─────────────────────────────────────────────────────────────
+  // ── Step Header ───────────────────────────────────────────────────────────
   stepHeader: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1674,7 +2314,7 @@ const styles = StyleSheet.create({
     color: '#333',
   },
 
-  // ── Cards ───────────────────────────────────────────────────────────────────
+  // ── Cards ─────────────────────────────────────────────────────────────────
   card: {
     backgroundColor: '#fff',
     margin: 16,
@@ -1697,7 +2337,7 @@ const styles = StyleSheet.create({
     borderLeftColor: BPCL_BLUE,
   },
 
-  // ── Form Elements ───────────────────────────────────────────────────────────
+  // ── Form Elements ─────────────────────────────────────────────────────────
   label: {
     fontSize: 14,
     color: '#666',
@@ -1715,8 +2355,15 @@ const styles = StyleSheet.create({
   hintText: {
     fontSize: 11,
     color: '#999',
-    marginTop: 4,
+    marginTop: 2,
+    marginBottom: 6,
     fontStyle: 'italic',
+  },
+  noteText: {
+    fontSize: 11,
+    color: '#999',
+    fontStyle: 'italic',
+    marginTop: 4,
   },
   row: {
     flexDirection: 'row',
@@ -1726,7 +2373,26 @@ const styles = StyleSheet.create({
     flex: 1,
   },
 
-  // ── Calc Rows ───────────────────────────────────────────────────────────────
+  // ── Checkbox / Split Preview ─────────────────────────────────────────────
+  checkboxRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 10,
+  },
+  checkboxLabel: {
+    fontSize: 14,
+    color: '#333',
+    fontWeight: '600',
+  },
+  splitPreviewText: {
+    fontSize: 13,
+    color: BPCL_BLUE,
+    marginTop: 6,
+    fontWeight: '600',
+  },
+
+  // ── Calc Rows ─────────────────────────────────────────────────────────────
   calcRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -1758,14 +2424,8 @@ const styles = StyleSheet.create({
     marginBottom: 8,
     marginTop: 4,
   },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: BPCL_BLUE,
-    marginBottom: 12,
-  },
 
-  // ── Buttons ─────────────────────────────────────────────────────────────────
+  // ── Buttons ───────────────────────────────────────────────────────────────
   nextButton: {
     backgroundColor: BPCL_BLUE,
     padding: 14,
@@ -1821,7 +2481,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
 
-  // ── Transfer ────────────────────────────────────────────────────────────────
+  // ── Transfer ──────────────────────────────────────────────────────────────
   transferCard: {
     backgroundColor: '#f8f9fa',
     padding: 14,
@@ -1898,7 +2558,7 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
   },
 
-  // ── Borrow ──────────────────────────────────────────────────────────────────
+  // ── Borrow ────────────────────────────────────────────────────────────────
   borrowCard: {
     backgroundColor: '#f8f9fa',
     padding: 14,
@@ -1926,8 +2586,22 @@ const styles = StyleSheet.create({
     color: '#1b5e20',
     fontStyle: 'italic',
   },
+  finalPreviewCard: {
+    backgroundColor: '#e3f2fd',
+    padding: 12,
+    borderRadius: 8,
+    marginVertical: 8,
+    borderLeftWidth: 4,
+    borderLeftColor: BPCL_BLUE,
+  },
+  finalPreviewTitle: {
+    fontSize: 13,
+    fontWeight: 'bold',
+    color: BPCL_BLUE,
+    marginBottom: 8,
+  },
 
-  // ── Modal ───────────────────────────────────────────────────────────────────
+  // ── Modal ─────────────────────────────────────────────────────────────────
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.5)',
@@ -1940,18 +2614,32 @@ const styles = StyleSheet.create({
     padding: 24,
     maxHeight: '85%',
   },
+  smallModalCard: {
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    padding: 20,
+    marginHorizontal: 24,
+    alignSelf: 'center',
+    width: '85%',
+  },
   modalHeader: {
     alignItems: 'center',
     marginBottom: 20,
   },
   modalTitle: {
-    fontSize: 22,
+    fontSize: 18,
     fontWeight: 'bold',
     color: '#333',
     marginTop: 8,
   },
   modalSubtitle: {
-    fontSize: 14,
+    fontSize: 15,
+    color: BPCL_BLUE,
+    fontWeight: '600',
+    marginTop: 4,
+  },
+  modalDate: {
+    fontSize: 13,
     color: '#888',
     marginTop: 4,
   },

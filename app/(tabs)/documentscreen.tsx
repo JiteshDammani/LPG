@@ -18,9 +18,12 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { format, differenceInCalendarDays, parseISO } from 'date-fns';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import * as DocumentPicker from 'expo-document-picker';
-import * as FileSystem from 'expo-file-system';
+// Using the legacy subpath: expo-file-system's new default export (SDK 53+) replaced
+// EncodingType / cacheDirectory / downloadAsync with a File/Directory class API.
+// The legacy import keeps the old flat API working without rewriting the logic below.
+import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
-import { supabase } from '../../lib/supabase';
+import { supabase } from '@/lib/supabase';
 
 const BPCL_BLUE   = '#017DC5';
 const BPCL_YELLOW = '#FFDC02';
@@ -585,7 +588,7 @@ export default function DocumentsScreen() {
                 <Ionicons name={iconForExt(editingDoc.file_ext)} size={26} color={BPCL_BLUE} />
                 <View style={{ flex: 1, marginLeft: 10 }}>
                   <Text style={styles.filePickName} numberOfLines={1}>{editingDoc.file_name}</Text>
-                  <Text style={styles.filePickHint}>File can't be replaced — delete &amp; re-upload instead</Text>
+                  <Text style={styles.filePickHint}>File can&apos;t be replaced — delete &amp; re-upload instead</Text>
                 </View>
               </View>
             )}

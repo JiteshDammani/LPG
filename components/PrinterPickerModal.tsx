@@ -4,7 +4,7 @@ import {
   listPairedDevices,
   connectAndSavePrinter,
   BluetoothDevice,
-} from '@/lib/thermalPrinter';
+} from '../lib/thermalPrinter';
 
 const BPCL_BLUE = '#017DC5';
 

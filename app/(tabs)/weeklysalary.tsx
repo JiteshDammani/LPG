@@ -464,8 +464,10 @@ export default function WeeklySalaryScreen() {
   // ── PDF Builders ──────────────────────────────────────────────────────────
 
   function buildMainSalaryHtml(weeks: WeekData[]): string {
-    const weekSections = weeks.map(week => {
-      const dataRows = week.mainRows.map((r, i) => `
+    // Split each week's rows into two roughly equal halves so every week prints
+    // across 2 physical pages with taller rows and real room to sign.
+    function renderTable(rows: MainRow[], totals: WeekData['mainTotals'] | null): string {
+      const dataRows = rows.map((r, i) => `
         <tr style="background:${i % 2 === 0 ? '#f5f9ff' : '#fff'}">
           <td>${r.srNo}</td>
           <td class="name-col">${r.fullName}</td>
@@ -479,14 +481,21 @@ export default function WeeklySalaryScreen() {
           <td class="sig-col"></td>
         </tr>`).join('');
 
-      const t = week.mainTotals;
+      const totalsRow = totals ? `
+              <tr class="totals-row">
+                <td></td>
+                <td class="name-col"><b>TOTAL</b></td>
+                <td><b>${totals.cylinder}</b></td>
+                <td></td>
+                <td><b>${totals.commision}</b></td>
+                <td><b>${totals.pfOnAmount}</b></td>
+                <td><b>${totals.pfDeduction}</b></td>
+                <td><b>${totals.esic}</b></td>
+                <td><b>${totals.net}</b></td>
+                <td></td>
+              </tr>` : '';
+
       return `
-        <div class="week-block">
-          <div class="company-header">SHREEJEE GAS SERVICE</div>
-          <div class="date-header">
-            <span>FROM ${fmtDisplay(week.startDateStr)} TO ${fmtDisplay(week.endDateStr)}</span>
-            <span>DATE OF PAYMENT: ${week.paymentDate}</span>
-          </div>
           <table>
             <thead>
               <tr>
@@ -503,22 +512,40 @@ export default function WeeklySalaryScreen() {
               </tr>
             </thead>
             <tbody>
-              ${dataRows}
-              <tr class="totals-row">
-                <td></td>
-                <td class="name-col"><b>TOTAL</b></td>
-                <td><b>${t.cylinder}</b></td>
-                <td></td>
-                <td><b>${t.commision}</b></td>
-                <td><b>${t.pfOnAmount}</b></td>
-                <td><b>${t.pfDeduction}</b></td>
-                <td><b>${t.esic}</b></td>
-                <td><b>${t.net}</b></td>
-                <td></td>
-              </tr>
+              ${dataRows}${totalsRow}
             </tbody>
-          </table>
+          </table>`;
+    }
+
+    function renderPageHeader(week: WeekData, pageLabel: string): string {
+      return `
+          <div class="company-header">SHREEJEE GAS SERVICE</div>
+          <div class="date-header">
+            <span>FROM ${fmtDisplay(week.startDateStr)} TO ${fmtDisplay(week.endDateStr)}</span>
+            <span>DATE OF PAYMENT: ${week.paymentDate}</span>
+            <span>${pageLabel}</span>
+          </div>`;
+    }
+
+    const weekSections = weeks.map(week => {
+      const rows = week.mainRows;
+      const mid = Math.ceil(rows.length / 2);
+      const page1Rows = rows.slice(0, mid);
+      const page2Rows = rows.slice(mid);
+
+      const page1 = `
+        <div class="week-block">
+          ${renderPageHeader(week, 'PAGE 1 OF 2')}
+          ${renderTable(page1Rows, null)}
         </div>`;
+
+      const page2 = `
+        <div class="week-block">
+          ${renderPageHeader(week, 'PAGE 2 OF 2')}
+          ${renderTable(page2Rows, week.mainTotals)}
+        </div>`;
+
+      return page1 + '<div class="page-break"></div>' + page2;
     }).join('<div class="page-break"></div>');
 
     return `<!DOCTYPE html>
@@ -528,15 +555,15 @@ export default function WeeklySalaryScreen() {
 <style>
   @page { size: A4 landscape; margin: 10mm 8mm; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: Arial, sans-serif; font-size: 8.5pt; color: #000; }
+  body { font-family: Arial, sans-serif; font-size: 10pt; color: #000; }
 
   .company-header {
     background: #1a3c5e;
     color: #fff;
     text-align: center;
-    font-size: 13pt;
+    font-size: 14pt;
     font-weight: bold;
-    padding: 8px;
+    padding: 10px;
     letter-spacing: 0.5px;
   }
   .date-header {
@@ -544,8 +571,8 @@ export default function WeeklySalaryScreen() {
     color: #fff;
     display: flex;
     justify-content: space-between;
-    padding: 5px 12px;
-    font-size: 9pt;
+    padding: 6px 14px;
+    font-size: 10pt;
     font-weight: bold;
   }
 
@@ -559,19 +586,20 @@ export default function WeeklySalaryScreen() {
 
   th, td {
     border: 1px solid #aac4e0;
-    padding: 5px 4px;
+    padding: 14px 6px;
     text-align: center;
     vertical-align: middle;
-    font-size: 8pt;
+    font-size: 9.5pt;
   }
   th {
     background: #d0e4f7;
     font-weight: bold;
     color: #1a3c5e;
-    font-size: 7.5pt;
+    font-size: 9pt;
+    padding: 8px 6px;
   }
-  td.name-col   { text-align: left; min-width: 140px; }
-  td.sig-col    { min-width: 80px; height: 28px; }
+  td.name-col   { text-align: left; min-width: 160px; }
+  td.sig-col    { min-width: 110px; height: 55px; }
 
   .totals-row td {
     background: #e8f4e8;
@@ -1067,7 +1095,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
     paddingVertical: 10, paddingHorizontal: 2,
     borderTopWidth: 2, borderTopColor: '#1a6b2a',
-    marginTop: 2, backgroundColor: '#e8f5e9', borderRadius: 6, paddingHorizontal: 8,
+    marginTop: 2, backgroundColor: '#e8f5e9', borderRadius: 6,
   },
   otherTotalLabel: { fontSize: 13, fontWeight: '800', color: '#1a4a1a' },
   otherTotalValue: { fontSize: 14, fontWeight: '800', color: '#1a4a1a' },
