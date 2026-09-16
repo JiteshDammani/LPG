@@ -1,0 +1,9 @@
+{
+  "compilerOptions": {
+    "lib": ["deno.ns", "dom"],
+    "strict": true
+  },
+  "imports": {
+    "unpdf": "https://esm.sh/unpdf@0.11.0"
+  }
+}
