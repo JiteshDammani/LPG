@@ -28,6 +28,7 @@ export type SachinRecord = {
   remarks: string;
   paytm_transaction: boolean;
   check_done: boolean;
+  debit_balance_report_id?: number | string | null;
 };
 
 export type PreviewData = {
@@ -36,6 +37,49 @@ export type PreviewData = {
   rows: string[][];
 };
 
+export interface TotalAhdData {
+  sumNumber: number;
+  sumEmptyReceived: number;
+}
+
+export async function fetchTotalAhdData(date: string | null | undefined): Promise<TotalAhdData | null> {
+  if (!date) return null;
+  const { data, error } = await supabase
+    .from('dashboard_deliveryrecords')
+    .select('number, empty_received')
+    .eq('date', date);
+  if (error) throw error;
+  if (!data) return null;
+
+  const sumNumber = data.reduce((acc, row) => acc + (Number(row.number) || 0), 0);
+  const sumEmptyReceived = data.reduce((acc, row) => acc + (Number(row.empty_received) || 0), 0);
+
+  return { sumNumber, sumEmptyReceived };
+}
+
+export async function fetchPreviousDayNetBalance(date: string | null | undefined): Promise<number | null> {
+  if (!date) return null;
+
+  const d = new Date(date + 'T00:00:00');
+  d.setDate(d.getDate() - 1);
+  const prevDate = d.toISOString().slice(0, 10); // YYYY-MM-DD
+
+  const { data, error } = await supabase
+    .from('dashboard_dailyrecord')
+    .select('amount, transactions')
+    .eq('date', prevDate);
+  if (error) throw error;
+  if (!data) return null;
+
+  const net = data.reduce((acc, row) => {
+    const amt = Number(row.amount) || 0;
+    if (row.transactions === 'CREDIT') return acc + amt;
+    if (row.transactions === 'DEBIT') return acc - amt;
+    return acc;
+  }, 0);
+
+  return net;
+}
 // ── Helper: get the Saturday on or before a given date ──────────────────
 function getSaturdayBefore(dateStr: string): Date {
   const d = new Date(dateStr);
@@ -50,6 +94,20 @@ function toYMD(d: Date): string {
 }
 
 // ── 1. Fetch the next pending record + total pending count ─────────────
+
+export async function fetchBalanceReportRow(
+  reportId: number | string | null | undefined
+): Promise<Record<string, any> | null> {
+  if (!reportId) return null;
+  const { data, error } = await supabase
+    .from('dashboard_debitbalancereport')
+    .select('*')
+    .eq('id', reportId)
+    .maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
 
 export async function fetchPendingSachinRecord(): Promise<{
   record: SachinRecord | null;
@@ -531,49 +589,54 @@ export async function approveSachinRecord(
       console.error('Commercial payment side-effect failed:', e.message);
     }
   } else if (category === 'BALANCE') {
-    const balanceName = (remarksUpper.includes('(')
-      ? remarksUpper.split('(')[0]
-      : remarksUpper
-    ).trim();
+    // NOTE: DebitBalanceReport is only ever UPDATED here — never inserted.
+    // record.debit_balance_report_id (the last column on the Sachin record)
+    // already points at the correct existing row in DebitBalanceReport for
+    // BOTH transaction directions, so both branches below look that row up
+    // by id and update it in place.
+    const balanceReportId = (record as any).debit_balance_report_id;
 
     if (record.transactions === 'DEBIT') {
-      const { error } = await supabase.from(TABLES.debitBalanceReport).insert({
-        date,
-        name: balanceName,
-        amount,
-        approve_status: true,
-      });
-      if (error) throw error;
-    } else if (record.transactions === 'CREDIT') {
-      const { data: balRow, error: fetchErr } = await supabase
-        .from(TABLES.debitBalanceReport)
-        .select('*')
-        .eq('name', balanceName)
-        .eq('status', false)
-        .order('date', { ascending: false })
-        .limit(1)
-        .maybeSingle();
-
-      if (fetchErr) throw fetchErr;
-
-      if (!balRow) {
-        console.warn(`No open DebitBalanceReport found for ${balanceName}`);
+      if (!balanceReportId) {
+        console.warn(`No debit_balance_report_id on Sachin record #${record.id} — cannot approve.`);
       } else {
-        const newAmountRec = (balRow.amount_rec ?? 0) + amount;
-        let dateReceived = balRow.date_received || String(date);
-        if (!dateReceived.includes(String(date))) {
-          dateReceived += `, ${date}`;
-        }
-        const { error: updateErr } = await supabase
+        const { error } = await supabase
           .from(TABLES.debitBalanceReport)
-          .update({
-            amount_rec: newAmountRec,
-            date_received: dateReceived,
-            status: balRow.amount === newAmountRec,
-            approve_status: true,
-          })
-          .eq('id', balRow.id);
-        if (updateErr) throw updateErr;
+          .update({ approve_status: true })
+          .eq('id', balanceReportId);
+        if (error) throw error;
+      }
+    } else if (record.transactions === 'CREDIT') {
+      if (!balanceReportId) {
+        console.warn(`No debit_balance_report_id on Sachin record #${record.id} — cannot approve.`);
+      } else {
+        const { data: balRow, error: fetchErr } = await supabase
+          .from(TABLES.debitBalanceReport)
+          .select('*')
+          .eq('id', balanceReportId)
+          .maybeSingle();
+
+        if (fetchErr) throw fetchErr;
+
+        if (!balRow) {
+          console.warn(`No DebitBalanceReport row found for id ${balanceReportId}`);
+        } else {
+          const newAmountRec = (balRow.amount_rec ?? 0) + amount;
+          let dateReceived = balRow.date_received || String(date);
+          if (!dateReceived.includes(String(date))) {
+            dateReceived += `, ${date}`;
+          }
+          const { error: updateErr } = await supabase
+            .from(TABLES.debitBalanceReport)
+            .update({
+              amount_rec: newAmountRec,
+              date_received: dateReceived,
+              status: balRow.amount === newAmountRec,
+              approve_status: true,
+            })
+            .eq('id', balanceReportId);
+          if (updateErr) throw updateErr;
+        }
       }
     }
   } else if (category === 'WEEKLY SALARY') {

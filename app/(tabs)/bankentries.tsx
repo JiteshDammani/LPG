@@ -98,6 +98,7 @@ interface ParsedStatementRow {
   txn_type: 'DEBIT' | 'CREDIT';
   amount: number;
   closing_balance: number | null;
+  forced_category?: CategoryValue; // when set, row is saved directly with this category
 }
 
 interface ParsedOnlineRow extends ParsedStatementRow {
@@ -286,7 +287,7 @@ function verifyUserPassword(password: string, dict: PdfEncryptDict): boolean {
   combined.set(dict.fileId, 32);
   let result = rc4(key, md5(combined));
   for (let i = 1; i <= 19; i++) {
-    const roundKey = key.map((b) => b ^ i);
+    const roundKey = key.map((b: any) => b ^ i);
     result = rc4(roundKey, result);
   }
   return result.every((b: number, i: number) => b === dict.uValue[i]);
@@ -345,13 +346,19 @@ function extractTextFromPdfBuffer(buffer: ArrayBufferLike): string {
   }
 
   const textParts: string[] = [];
-  const streamRegex = /(\d+)\s+(\d+)\s+obj[\s\S]*?<<([\s\S]*?)>>\s*stream\r?\n([\s\S]*?)\r?\nendstream/g;
-  let match: RegExpExecArray | null;
+  const objBoundRegex     = /(\d+)\s+(\d+)\s+obj([\s\S]*?)endobj/g;
+  const streamInBodyRegex = /<<([\s\S]*?)>>\s*stream\r?\n([\s\S]*?)\r?\nendstream/;
 
-  while ((match = streamRegex.exec(binStr)) !== null) {
-    const dict = match[3];
-    const streamRaw = match[4];
-    const isFlate = isFlateFilter(dict);
+  let objMatch: RegExpExecArray | null;
+  while ((objMatch = objBoundRegex.exec(binStr)) !== null) {
+    const body = objMatch[3];
+
+    const sm = streamInBodyRegex.exec(body);
+    if (!sm) continue; // this object has no stream of its own — skip it
+
+    const dict      = sm[1];
+    const streamRaw = sm[2];
+    const isFlate   = isFlateFilter(dict);
 
     if (isFlate) {
       if (!pako) {
@@ -387,7 +394,6 @@ function extractTextFromPdfBuffer(buffer: ArrayBufferLike): string {
 
   return textParts.join('\n');
 }
-
 // ─────────────────────────────────────────────────────────────────────────────
 // FULL PDF DECRYPT + TEXT EXTRACT (WITH PAKO DECOMPRESSION)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -446,15 +452,21 @@ function decryptPdfAndExtractText(buf: any, password: string): string | null {
   const encKey     = deriveEncryptionKey(pwdOk ? password : '', dict);
   const textParts: string[] = [];
 
-  const objRegex = /(\d+)\s+(\d+)\s+obj[\s\S]*?<<([\s\S]*?)>>\s*stream\r?\n([\s\S]*?)\r?\nendstream/g;
+  const objBoundRegex     = /(\d+)\s+(\d+)\s+obj([\s\S]*?)endobj/g;
+  const streamInBodyRegex = /<<([\s\S]*?)>>\s*stream\r?\n([\s\S]*?)\r?\nendstream/;
   let objMatch: RegExpExecArray | null;
 
-  while ((objMatch = objRegex.exec(raw)) !== null) {
+  while ((objMatch = objBoundRegex.exec(raw)) !== null) {
     const objNum = parseInt(objMatch[1], 10);
     const genNum = parseInt(objMatch[2], 10);
-    const dictText = objMatch[3];
-    const streamRaw = objMatch[4];
+    const body   = objMatch[3];
     if (objNum === encObjNum) continue;
+
+    const sm = streamInBodyRegex.exec(body);
+    if (!sm) continue; // this object has no stream of its own — skip it
+
+    const dictText  = sm[1];
+    const streamRaw = sm[2];
 
     const isFlate = isFlateFilter(dictText);
 
@@ -617,6 +629,13 @@ function formatDisplayDate(iso: string): string {
   catch { return iso; }
 }
 
+function formatDDMMYYYY(iso: string | null): string {
+  if (!iso) return 'No entries yet';
+  const [y, m, d] = iso.split('-');
+  if (!y || !m || !d) return 'No entries yet';
+  return `${d}-${m}-${y}`;
+}
+
 function darken(hex: string, factor = 0.85): string {
   const h = hex.replace('#', '');
   const r = Math.round(parseInt(h.substring(0, 2), 16) * factor);
@@ -715,157 +734,78 @@ function parseHdfcRows(rows: string[][]): {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ARVIND BANK PDF PARSER
+// Date-segment based: each transaction runs from one date to the next, so it
+// doesn't matter if wrapped narration text pushes the amounts onto a different
+// extracted line (this was why rows like "...bharatgas2" were being skipped).
 // ─────────────────────────────────────────────────────────────────────────────
 function parseArvindBankText(text: string): ParsedStatementRow[] {
   const rows: ParsedStatementRow[] = [];
   if (!text) return rows;
 
-  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  const fullText = text.replace(/\r/g, ' ').replace(/\n/g, ' ').replace(/\s+/g, ' ');
 
-  const dateRegex = /\b\d{1,2}[-/\s.](?:\d{1,2}|[A-Za-z]{3})[-/\s.](?:\d{4}|\d{2})\b/;
+  // Date like 12-09-2026 (a leading ' from the PDF is ignored automatically)
+  const dateRe = /\b\d{1,2}[-/.](?:\d{1,2}|[A-Za-z]{3})[-/.]\d{4}\b/g;
+  const dates: { index: number; str: string }[] = [];
+  let dm: RegExpExecArray | null;
+  while ((dm = dateRe.exec(fullText)) !== null) dates.push({ index: dm.index, str: dm[0] });
 
-  for (const line of lines) {
-    const dateMatch = line.match(dateRegex);
-    if (!dateMatch) continue;
-
-    const rawDate = dateMatch[0];
-    const isoDate = formatStatementDate(rawDate);
+  for (let i = 0; i < dates.length; i++) {
+    const start = dates[i].index;
+    const end = i + 1 < dates.length ? dates[i + 1].index : fullText.length;
+    const segment = fullText.substring(start, end);
+    const isoDate = formatStatementDate(dates[i].str);
     if (!isoDate) continue;
 
-    const numPattern = /\b[\d,]+\.\d{2}\b/g;
-    const nums: string[] = [];
-    let nm: RegExpExecArray | null;
-    while ((nm = numPattern.exec(line)) !== null) {
-      nums.push(nm[0].replace(/,/g, ''));
+    const nums = (segment.match(/\b[\d,]+\.\d{2}\b/g) || []).map((n) => n.replace(/,/g, ''));
+    if (nums.length < 2) continue;
+
+    let debit = 0, credit = 0;
+    const closing = parseFloat(nums[nums.length - 1]);
+    if (nums.length >= 3) {
+      debit = parseFloat(nums[nums.length - 3]);
+      credit = parseFloat(nums[nums.length - 2]);
+    } else {
+      const amt = parseFloat(nums[0]);
+      const u = segment.toUpperCase();
+      if (u.includes('BY') || u.includes('CREDIT') || u.includes('CR') || u.includes('DEP') || u.includes('INTEREST')) credit = amt;
+      else debit = amt;
     }
 
-    if (nums.length >= 2) {
-      const closing = parseFloat(nums[nums.length - 1]);
-      let debit = 0;
-      let credit = 0;
+    const hasDebit = !isNaN(debit) && debit > 0;
+    const hasCredit = !isNaN(credit) && credit > 0;
+    if (!hasDebit && !hasCredit) continue;
 
-      if (nums.length >= 3) {
-        debit  = parseFloat(nums[nums.length - 3]);
-        credit = parseFloat(nums[nums.length - 2]);
-      } else {
-        const amount = parseFloat(nums[0]);
-        const upper = line.toUpperCase();
-        if (
-          upper.includes('BY') ||
-          upper.includes('CREDIT') ||
-          upper.includes('CR') ||
-          upper.includes('DEP') ||
-          upper.includes('INTEREST')
-        ) {
-          credit = amount;
-        } else {
-          debit = amount;
-        }
-      }
+    let narration = segment
+      .replace(dates[i].str, '')
+      .replace(/\b[\d,]+\.\d{2}\b/g, '');
 
-      const hasDebit = !isNaN(debit) && debit > 0;
-      const hasCredit = !isNaN(credit) && credit > 0;
-      if (!hasDebit && !hasCredit) continue;
-
-      let narration = line
-        .replace(rawDate, '')
-        .replace(/\b[\d,]+\.\d{2}\b/g, '')
-        .replace(/\s+/g, ' ')
-        .trim();
-
-      const chqMatch = narration.match(/\b(\d{5,6})\b\s*$/);
-      let refNo: string | null = null;
-      if (chqMatch) {
-        refNo = chqMatch[1] === '000000' ? null : chqMatch[1];
-        narration = narration.replace(chqMatch[0], '').trim();
-      }
-
-      if (narration) {
-        rows.push({
-          statement_date: isoDate,
-          narration,
-          ref_no: refNo,
-          txn_type: hasDebit ? 'DEBIT' : 'CREDIT',
-          amount: hasDebit ? debit : credit,
-          closing_balance: isNaN(closing) ? null : closing,
-        });
-      }
+    // cheque/ref column: a standalone 6-digit token (e.g. 000000), wherever it landed
+    let refNo: string | null = null;
+    const refMatch = narration.match(/(?:^|\s)(\d{6})(?=\s|$)/);
+    if (refMatch) {
+      refNo = refMatch[1] === '000000' ? null : refMatch[1];
+      narration = narration.replace(refMatch[0], ' ');
     }
+
+    narration = narration
+      .replace(/^[\s']+/, '')
+      .replace(/\s+\d{1,4}\s*'?\s*$/, '')  // serial no. of the NEXT row (e.g. "21 '")
+      .replace(/'/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!narration) continue;
+
+    rows.push({
+      statement_date: isoDate,
+      narration,
+      ref_no: refNo,
+      txn_type: hasDebit ? 'DEBIT' : 'CREDIT',
+      amount: hasDebit ? debit : credit,
+      closing_balance: isNaN(closing) ? null : closing,
+    });
   }
-
-  if (rows.length === 0) {
-    const fullText = text.replace(/\r/g, ' ').replace(/\n/g, ' ').replace(/\s+/g, ' ');
-    const globalDateRegex = /\b\d{1,2}[-/\s.](?:\d{1,2}|[A-Za-z]{3})[-/\s.](?:\d{4}|\d{2})\b/g;
-
-    const dateMatches: Array<{ index: number; dateStr: string }> = [];
-    let dm: RegExpExecArray | null;
-    while ((dm = globalDateRegex.exec(fullText)) !== null) {
-      dateMatches.push({ index: dm.index, dateStr: dm[0] });
-    }
-
-    for (let i = 0; i < dateMatches.length; i++) {
-      const start   = dateMatches[i].index;
-      const end     = i + 1 < dateMatches.length ? dateMatches[i + 1].index : fullText.length;
-      const segment = fullText.substring(start, end).trim();
-      const isoDate = formatStatementDate(dateMatches[i].dateStr);
-      if (!isoDate) continue;
-
-      const numPattern = /[\d,]+\.\d{2}/g;
-      const nums: string[] = [];
-      let nm: RegExpExecArray | null;
-      while ((nm = numPattern.exec(segment)) !== null)
-        nums.push(nm[0].replace(/,/g, ''));
-      if (nums.length < 2) continue;
-
-      let debit = 0;
-      let credit = 0;
-      let closing = NaN;
-
-      if (nums.length >= 3) {
-        debit   = parseFloat(nums[nums.length - 3]);
-        credit  = parseFloat(nums[nums.length - 2]);
-        closing = parseFloat(nums[nums.length - 1]);
-      } else {
-        const amt = parseFloat(nums[0]);
-        closing = parseFloat(nums[1]);
-        const upperSeg = segment.toUpperCase();
-        if (upperSeg.includes('BY') || upperSeg.includes('CR') || upperSeg.includes('CREDIT')) {
-          credit = amt;
-        } else {
-          debit = amt;
-        }
-      }
-
-      const hasDebit  = !isNaN(debit)  && debit  > 0;
-      const hasCredit = !isNaN(credit) && credit > 0;
-      if (!hasDebit && !hasCredit) continue;
-
-      let narrationRaw = segment
-        .replace(dateMatches[i].dateStr, '')
-        .replace(/[\d,]+\.\d{2}/g, '')
-        .replace(/\s+/g, ' ')
-        .trim();
-
-      const refMatch = narrationRaw.match(/(\d{5,6})\s*$/);
-      let refNo: string | null = null;
-      if (refMatch) {
-        refNo = refMatch[1] === '000000' ? null : refMatch[1];
-        narrationRaw = narrationRaw.substring(0, narrationRaw.length - refMatch[0].length).trim();
-      }
-
-      if (narrationRaw) {
-        rows.push({
-          statement_date:  isoDate,
-          narration:       narrationRaw,
-          ref_no:          refNo,
-          txn_type:        hasDebit ? 'DEBIT' : 'CREDIT',
-          amount:          hasDebit ? debit : credit,
-          closing_balance: isNaN(closing) ? null : closing,
-        });
-      }
-    }
-  }
-
   return rows;
 }
 
@@ -996,7 +936,8 @@ function parsePdfStatementRows(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ONLINE PAYMENT PDF REPORT BUILDER
+// ONLINE PAYMENT PDF REPORT BUILDER (legacy report with cylinder rate —
+// still used by the AUB / ARVIND import path if online rows are detected)
 // ─────────────────────────────────────────────────────────────────────────────
 function buildOnlinePaymentReportHtml(entries: ParsedOnlineRow[], rate: number): string {
   const byDate: Record<string, ParsedOnlineRow[]> = {};
@@ -1120,15 +1061,174 @@ function buildOnlinePaymentReportHtml(entries: ParsedOnlineRow[], rate: number):
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ONLINE PAYMENT SHEET (all banks) — every entry saved with category
+// ONLINE_PAYMENT, showing Bank + Narration
+// ─────────────────────────────────────────────────────────────────────────────
+const MONTH_NAMES = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+];
+
+function buildOnlinePaymentTableHtml(
+  rows: OtherEntryRow[],
+  periodLabel: string,
+  rate: number
+): string {
+  const money = (n: number) =>
+    n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const esc = (s: string) =>
+    (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  const byDate: Record<string, OtherEntryRow[]> = {};
+  rows.forEach((e) => {
+    byDate[e.statement_date] = byDate[e.statement_date] || [];
+    byDate[e.statement_date].push(e);
+  });
+  const dates = Object.keys(byDate).sort();
+  const grandTotal = rows.reduce((s, e) => s + e.amount, 0);
+  const totalUnits = grandTotal / rate;
+
+  // Category-wise totals (keyword found in narration; otherwise OTHER ONLINE)
+  const byCategory: Record<string, { count: number; total: number }> = {};
+  rows.forEach((e) => {
+    const kw = matchExcludeKeyword((e.narration || '').toUpperCase()) || 'OTHER ONLINE';
+    byCategory[kw] = byCategory[kw] || { count: 0, total: 0 };
+    byCategory[kw].count += 1;
+    byCategory[kw].total += e.amount;
+  });
+  const categoryRows = Object.entries(byCategory)
+    .map(([cat, v]) => `
+      <tr>
+        <td><span style="color:${CATEGORY_COLORS[cat as OnlineCategory] || '#444'};font-weight:700">${cat}</span></td>
+        <td style="text-align:right">${v.count}</td>
+        <td style="text-align:right">${money(v.total)}</td>
+        <td style="text-align:right">${((v.total / grandTotal) * 100).toFixed(1)}%</td>
+      </tr>`)
+    .join('');
+
+  // Bank-wise totals
+  const byBank: Record<string, { count: number; total: number }> = {};
+  rows.forEach((e) => {
+    const b = e.bank_source || 'UNKNOWN';
+    byBank[b] = byBank[b] || { count: 0, total: 0 };
+    byBank[b].count += 1;
+    byBank[b].total += e.amount;
+  });
+  const bankRows = Object.entries(byBank)
+    .map(([b, v]) => `
+      <tr>
+        <td style="font-weight:700">${esc(b)}</td>
+        <td style="text-align:right">${v.count}</td>
+        <td style="text-align:right">${money(v.total)}</td>
+        <td style="text-align:right">${(v.total / rate).toFixed(2)}</td>
+      </tr>`)
+    .join('');
+
+  const dateSummaryRows = dates
+    .map((d, i) => {
+      const dayTotal = byDate[d].reduce((s, e) => s + e.amount, 0);
+      return `
+      <tr style="background:${DATE_BG[i % 2]}">
+        <td>${formatDisplayDate(d)}</td>
+        <td style="text-align:right">${byDate[d].length}</td>
+        <td style="text-align:right">${money(dayTotal)}</td>
+        <td style="text-align:right">${(dayTotal / rate).toFixed(2)}</td>
+      </tr>`;
+    })
+    .join('');
+
+  const detailSections = dates
+    .map((d, i) => {
+      const bg = DATE_BG[i % 2];
+      const dayTotal = byDate[d].reduce((s, e) => s + e.amount, 0);
+      const rowsHtml = byDate[d]
+        .map((e) => `
+      <tr style="background:${bg}">
+        <td>${formatDisplayDate(e.statement_date)}</td>
+        <td>${esc(e.bank_source || '')}</td>
+        <td>${esc(e.narration)}</td>
+        <td style="text-align:right">${money(e.amount)}</td>
+      </tr>`)
+        .join('');
+      return (
+        rowsHtml +
+        `
+      <tr style="background:${darken(bg)}">
+        <td colspan="3" style="font-weight:700">Date Total — ${formatDisplayDate(d)}</td>
+        <td style="text-align:right;font-weight:700">${money(dayTotal)}</td>
+      </tr>`
+      );
+    })
+    .join('');
+
+  return `
+  <html><head><meta charset="utf-8"/>
+  <style>
+    body{font-family:Helvetica,Arial,sans-serif;padding:24px;color:#222}
+    h1{font-size:20px;margin-bottom:2px}
+    .sub{font-size:11px;color:#555;margin-bottom:4px}
+    table{width:100%;border-collapse:collapse;margin-top:10px;font-size:11px}
+    th,td{border:1px solid #b0b0b0;padding:5px 6px;vertical-align:top}
+    th{background:#263238;color:#fff;text-align:left}
+    .overview td{padding:8px}
+    .overview td:first-child{background:#eceff1;font-weight:700;width:55%}
+    h2{font-size:14px;color:#263238;margin-top:22px;margin-bottom:6px}
+    .grand td{background:#37474f;color:#fff;font-weight:700}
+    .pagebreak{page-break-before:always}
+    .note{font-size:9px;color:#666;margin-bottom:6px}
+  </style></head><body>
+  <h1>SHREEJEE GAS SERVICE — Online Payment Report</h1>
+  <div class="sub">Period: ${periodLabel} · All banks</div>
+  <table class="overview">
+    <tr><td>Total Entries</td><td style="text-align:right">${rows.length}</td></tr>
+    <tr><td>Distinct Dates</td><td style="text-align:right">${dates.length}</td></tr>
+    <tr><td>Refill Amount Used</td><td style="text-align:right">₹${rate.toLocaleString('en-IN')}</td></tr>
+    <tr><td>Grand Total (Rs.)</td><td style="text-align:right">${money(grandTotal)}</td></tr>
+    <tr><td>Total Quantity (Amount ÷ Refill Amount)</td><td style="text-align:right">${totalUnits.toFixed(2)}</td></tr>
+  </table>
+  <h2>Category-wise Totals</h2>
+  <table>
+    <tr><th>Category</th><th>Count</th><th>Total (Rs.)</th><th>% of Total</th></tr>
+    ${categoryRows}
+  </table>
+  <h2>Bank-wise Totals</h2>
+  <table>
+    <tr><th>Bank</th><th>Count</th><th>Total (Rs.)</th><th>Quantity</th></tr>
+    ${bankRows}
+  </table>
+  <h2>Date-wise Totals</h2>
+  <div class="note">Quantity = Total Amount ÷ ₹${rate} (refill amount entered at export time)</div>
+  <table>
+    <tr><th>Date</th><th>Count</th><th>Total (Rs.)</th><th>Quantity</th></tr>
+    ${dateSummaryRows}
+    <tr class="grand">
+      <td>GRAND TOTAL</td>
+      <td style="text-align:right">${rows.length}</td>
+      <td style="text-align:right">${money(grandTotal)}</td>
+      <td style="text-align:right">${totalUnits.toFixed(2)}</td>
+    </tr>
+  </table>
+  <div class="pagebreak"></div>
+  <h1>Detailed Entries</h1>
+  <div class="sub">Grouped by date, alternating highlight colors, per-date subtotals</div>
+  <table>
+    <tr><th>Date</th><th>Bank</th><th>Narration</th><th>Amount (Rs.)</th></tr>
+    ${detailSections}
+  </table>
+  </body></html>`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // BANK SELECTION MODAL
 // ─────────────────────────────────────────────────────────────────────────────
 interface BankSelectionModalProps {
-  visible:  boolean;
-  onSelect: (bank: BankType) => void;
-  onClose:  () => void;
+  visible:     boolean;
+  onSelect:    (bank: BankType) => void;
+  onClose:     () => void;
+  latestDates: { HDFC: string | null; ARVIND: string | null; AUB: string | null };
 }
 
-function BankSelectionModal({ visible, onSelect, onClose }: BankSelectionModalProps) {
+function BankSelectionModal({ visible, onSelect, onClose, latestDates }: BankSelectionModalProps) {
   const banks: { id: BankType; label: string; subtitle: string; color: string; icon: string }[] = [
     {
       id: 'HDFC', label: 'HDFC Bank',
@@ -1175,6 +1275,9 @@ function BankSelectionModal({ visible, onSelect, onClose }: BankSelectionModalPr
                   {bank.label}
                 </Text>
                 <Text style={bankModalStyles.bankSub}>{bank.subtitle}</Text>
+                <Text style={bankModalStyles.bankLatest}>
+                  Latest entry: {formatDDMMYYYY(latestDates[bank.id])}
+                </Text>
               </View>
               <Ionicons name="chevron-forward" size={16} color="#999" />
             </TouchableOpacity>
@@ -1191,9 +1294,10 @@ const bankModalStyles = StyleSheet.create({
     backgroundColor: '#f8f9fa', borderRadius: 10,
     padding: 12, marginBottom: 10, borderLeftWidth: 4, gap: 12,
   },
-  iconBox:   { width: 36, height: 36, borderRadius: 8, justifyContent: 'center', alignItems: 'center' },
-  bankLabel: { fontSize: 14, fontWeight: '700' },
-  bankSub:   { fontSize: 11, color: '#666', marginTop: 2 },
+  iconBox:    { width: 36, height: 36, borderRadius: 8, justifyContent: 'center', alignItems: 'center' },
+  bankLabel:  { fontSize: 14, fontWeight: '700' },
+  bankSub:    { fontSize: 11, color: '#666', marginTop: 2 },
+  bankLatest: { fontSize: 10, color: '#999', marginTop: 3, fontWeight: '600' },
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1259,6 +1363,12 @@ export default function OtherEntriesScreen() {
   const [pendingEntries, setPendingEntries] = useState<OtherEntryRow[]>([]);
   const [approvedCount,  setApprovedCount]  = useState(0);
 
+  const [bankLatestDates, setBankLatestDates] = useState<{
+        HDFC: string | null;
+        ARVIND: string | null;
+        AUB: string | null;
+      }>({ HDFC: null, ARVIND: null, AUB: null });
+
   const [showCategoryPopup, setShowCategoryPopup] = useState(false);
   const [activeEntry,       setActiveEntry]        = useState<OtherEntryRow | null>(null);
   const [selectedCategory,  setSelectedCategory]   = useState<CategoryValue | null>(null);
@@ -1270,13 +1380,46 @@ export default function OtherEntriesScreen() {
   const [cylinderRateInput,     setCylinderRateInput]      = useState('');
   const [generatingPdf,         setGeneratingPdf]          = useState(false);
 
+  const [showPeriodPopup, setShowPeriodPopup] = useState(false);
+  const [periodMonth,     setPeriodMonth]     = useState<number>(new Date().getMonth() + 1); // 1-12
+  const [periodYear,      setPeriodYear]      = useState<number>(new Date().getFullYear());
+  const [refillInput,     setRefillInput]     = useState('');
+
   const [showBankModal,     setShowBankModal]     = useState(false);
   const [pendingPdfUri,     setPendingPdfUri]     = useState<string | null>(null);
   const [pendingFileName,   setPendingFileName]   = useState<string>('');
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [passwordLoading,   setPasswordLoading]   = useState(false);
 
-  useEffect(() => { loadEntries(); }, []);
+  useEffect(() => {
+    loadEntries();
+    fetchLatestBankDates();
+  }, []);
+
+  const fetchLatestBankDates = async () => {
+    try {
+      const banks: BankType[] = ['HDFC', 'ARVIND', 'AUB'];
+      const results = await Promise.all(
+        banks.map((bank) =>
+          supabase
+            .from('dashboard_otherbankentries')
+            .select('statement_date')
+            .eq('bank_source', bank)
+            .order('statement_date', { ascending: false })
+            .limit(1)
+            .maybeSingle()
+        )
+      );
+
+      setBankLatestDates({
+        HDFC: results[0].data?.statement_date || null,
+        ARVIND: results[1].data?.statement_date || null,
+        AUB: results[2].data?.statement_date || null,
+      });
+    } catch (err) {
+      // Silent fail — modal just shows no date if this fails
+    }
+  };
 
   const loadEntries = async () => {
     setLoading(true);
@@ -1308,7 +1451,10 @@ export default function OtherEntriesScreen() {
     }
   };
 
-  const handleImportStatement = () => setShowBankModal(true);
+  const handleImportStatement = async () => {
+    await fetchLatestBankDates();
+    setShowBankModal(true);
+  };
 
   const handleBankSelected = async (bank: BankType) => {
     setShowBankModal(false);
@@ -1370,7 +1516,18 @@ export default function OtherEntriesScreen() {
         );
         return;
       }
-      await finalizeImport(otherRows, onlineRows, fileName, 'HDFC');
+
+      // PAYTM / INDIAIDEAS / EURONET rows are no longer excluded — they are
+      // saved straight into the table with category = ONLINE_PAYMENT.
+      const onlineAsOther: ParsedStatementRow[] = onlineRows.map(
+        ({ source_category, ...r }) => ({
+          ...r,
+          forced_category: 'ONLINE_PAYMENT' as CategoryValue,
+        })
+      );
+
+      // [] as the 2nd argument = no PDF/rate popup after import
+      await finalizeImport([...otherRows, ...onlineAsOther], [], fileName, 'HDFC');
     } catch (err: any) {
       Alert.alert('Import Error', err?.message || 'Failed to import HDFC statement.');
     } finally {
@@ -1439,12 +1596,9 @@ export default function OtherEntriesScreen() {
   };
 
   // ───────────────────────────────────────────────────────────────────────
-  // FIX: previously, re-importing a statement that contained an entry the
-  // user had already approved would upsert that row again with
-  // approved:false, silently un-approving it and making it reappear in the
-  // "Awaiting Categorization" list. We now look up which (date, narration)
-  // pairs are already approved in the DB BEFORE upserting, and skip those
-  // rows entirely instead of overwriting them.
+  // Rows already approved earlier are skipped (so re-imports never un-approve
+  // them), and the same date+narration appearing twice in one file is only
+  // inserted once (no duplicates → calculations stay correct).
   // ───────────────────────────────────────────────────────────────────────
   const finalizeImport = async (
     otherRows:  ParsedStatementRow[],
@@ -1469,12 +1623,12 @@ export default function OtherEntriesScreen() {
         (existingApproved || []).map((e: any) => `${e.statement_date}|${e.narration}`)
       );
 
+      const seenInFile = new Set<string>();
       const rowsToUpsert = otherRows.filter((r) => {
         const key = `${r.statement_date}|${r.narration}`;
-        if (approvedKeys.has(key)) {
-          skippedAlreadyApproved++;
-          return false;
-        }
+        if (approvedKeys.has(key)) { skippedAlreadyApproved++; return false; }
+        if (seenInFile.has(key)) return false; // duplicate inside this file → ignore
+        seenInFile.add(key);
         return true;
       });
 
@@ -1488,8 +1642,17 @@ export default function OtherEntriesScreen() {
           let approved_by: string | null = null;
           let approved_at: string | null = null;
 
+          // Forced category (HDFC PAYTM / INDIAIDEAS / EURONET) → saved
+          // directly as Online Payment. Set approved = false below if you
+          // would rather review these manually.
+          if (r.forced_category) {
+            category = r.forced_category;
+            approved = true;
+            approved_by = 'system';
+            approved_at = new Date().toISOString();
+          }
           // Auto-Approval Rule 1: Cash deposits in Arvind Bank -> CASH_DEPOSIT
-          if (
+          else if (
             bankSource === 'ARVIND' &&
             r.txn_type === 'CREDIT' &&
             upperNarr.includes('BY CASH')
@@ -1535,8 +1698,10 @@ export default function OtherEntriesScreen() {
     }
 
     await loadEntries();
+    await fetchLatestBankDates();
 
     if (onlineRows.length > 0) {
+      // Only reachable for banks that still pass excluded online rows (AUB / ARVIND)
       setExcludedOnlineEntries(onlineRows);
       setCylinderRateInput('');
       setShowRatePopup(true);
@@ -1544,11 +1709,10 @@ export default function OtherEntriesScreen() {
       Alert.alert(
         'Import Successful ✓',
         `Bank: ${bankSource}\n` +
-        `${importedCount} entries imported for review.\n` +
+        `${importedCount} entries imported.\n` +
         (skippedAlreadyApproved > 0
-          ? `${skippedAlreadyApproved} entries skipped (already approved earlier).\n`
-          : '') +
-        `(0 online-payment entries detected in this statement)`
+          ? `${skippedAlreadyApproved} entries skipped (already approved earlier).`
+          : '')
       );
     }
   };
@@ -1573,6 +1737,58 @@ export default function OtherEntriesScreen() {
       setExcludedOnlineEntries([]);
     } catch (err: any) {
       Alert.alert('PDF Error', err?.message || 'Failed to generate PDF');
+    } finally {
+      setGeneratingPdf(false);
+    }
+  };
+
+  // Online Payment sheet: entries with category ONLINE_PAYMENT, any bank,
+  // limited to the selected month + year.
+  const handleOnlinePaymentSheet = async () => {
+    const rate = parseFloat(refillInput);
+    if (!rate || rate <= 0) return Alert.alert('Error', 'Enter a valid refill amount');
+    const mm = String(periodMonth).padStart(2, '0');
+    const lastDay = new Date(periodYear, periodMonth, 0).getDate();
+    const fromDate = `${periodYear}-${mm}-01`;
+    const toDate = `${periodYear}-${mm}-${String(lastDay).padStart(2, '0')}`;
+    const periodLabel = `${MONTH_NAMES[periodMonth - 1]} ${periodYear}`;
+
+    setGeneratingPdf(true);
+    try {
+      // Supabase returns max 1000 rows per request, so fetch in pages
+      let all: OtherEntryRow[] = [];
+      for (let from = 0; ; from += 1000) {
+        const { data, error } = await supabase
+          .from('dashboard_otherbankentries')
+          .select('*')
+          .eq('category', 'ONLINE_PAYMENT')
+          .gte('statement_date', fromDate)
+          .lte('statement_date', toDate)
+          .order('statement_date', { ascending: true })
+          .range(from, from + 999);
+        if (error) throw error;
+        all = all.concat((data as OtherEntryRow[]) || []);
+        if (!data || data.length < 1000) break;
+      }
+
+      if (all.length === 0) {
+        Alert.alert('No Entries', `No Online Payment entries found for ${periodLabel}.`);
+        return;
+      }
+
+      setShowPeriodPopup(false);
+      const html = buildOnlinePaymentTableHtml(all, periodLabel, rate);
+      const { uri } = await Print.printToFileAsync({ html, base64: false });
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(uri, {
+          mimeType: 'application/pdf',
+          dialogTitle: 'Online Payment Entries',
+        });
+      } else {
+        Alert.alert('PDF Ready', `Saved to: ${uri}`);
+      }
+    } catch (err: any) {
+      Alert.alert('PDF Error', err?.message || 'Failed to generate sheet');
     } finally {
       setGeneratingPdf(false);
     }
@@ -1650,11 +1866,11 @@ export default function OtherEntriesScreen() {
               </View>
               <Text style={styles.subtext}>
                 Supports HDFC Bank (Excel/CSV), Arvind Sahakari Bank (PDF) and
-                Akola Urban Bank / AUB (password-protected PDF). PAYTM /
-                INDIAIDEAS / EURONET entries are automatically separated into an
-                Online Payment PDF report. Duplicate entries (same date +
-                narration) are silently skipped, and already-approved entries
-                are never re-added.
+                Akola Urban Bank / AUB (password-protected PDF). HDFC entries with
+                PAYTM / INDIAIDEAS / EURONET are saved directly with category
+                Online Payment. Duplicate entries (same date + narration) are
+                never inserted twice, and already-approved entries are never
+                re-added.
               </Text>
 
               <View style={styles.bankLegend}>
@@ -1752,6 +1968,18 @@ export default function OtherEntriesScreen() {
             )}
           </View>
 
+          {/* ONLINE PAYMENT SHEET (ALL BANKS) */}
+          <View style={styles.card}>
+            <TouchableOpacity
+              style={[styles.csvButton, { backgroundColor: '#0288d1' }]}
+              onPress={() => setShowPeriodPopup(true)}
+              disabled={generatingPdf}
+            >
+              <Ionicons name="document-text-outline" size={16} color="#fff" />
+              <Text style={styles.csvButtonText}>Online Payment Sheet (All Banks)</Text>
+            </TouchableOpacity>
+          </View>
+
           <View style={{ height: 40 }} />
         </ScrollView>
       )}
@@ -1761,6 +1989,7 @@ export default function OtherEntriesScreen() {
         visible={showBankModal}
         onSelect={handleBankSelected}
         onClose={() => setShowBankModal(false)}
+        latestDates={bankLatestDates}
       />
 
       {/* AUB PASSWORD MODAL */}
@@ -1828,6 +2057,76 @@ export default function OtherEntriesScreen() {
               {savingApproval
                 ? <ActivityIndicator color="#fff" />
                 : <Text style={styles.submitText}>APPROVE & SAVE</Text>
+              }
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
+
+      {/* ONLINE PAYMENT SHEET — MONTH / YEAR PICKER */}
+      {showPeriodPopup && (
+        <View style={styles.overlay}>
+          <View style={styles.popup}>
+            <View style={styles.popupHeader}>
+              <Text style={styles.popupTitle}>Select Period</Text>
+              <TouchableOpacity onPress={() => setShowPeriodPopup(false)}>
+                <Text style={styles.closeX}>✕</Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.popupNarration}>
+              Choose the month and year, and enter the refill amount to calculate quantities.
+            </Text>
+
+            <Text style={[styles.label, { marginTop: 14 }]}>Year</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 20 }}>
+              <TouchableOpacity onPress={() => setPeriodYear((y) => y - 1)}>
+                <Ionicons name="chevron-back" size={24} color={BPCL_BLUE} />
+              </TouchableOpacity>
+              <Text style={{ fontSize: 20, fontWeight: 'bold', color: '#333' }}>{periodYear}</Text>
+              <TouchableOpacity onPress={() => setPeriodYear((y) => y + 1)}>
+                <Ionicons name="chevron-forward" size={24} color={BPCL_BLUE} />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={[styles.label, { marginTop: 14 }]}>Month</Text>
+            <View style={styles.categoryGrid}>
+              {MONTH_NAMES.map((name, idx) => {
+                const active = periodMonth === idx + 1;
+                return (
+                  <TouchableOpacity
+                    key={name}
+                    style={[
+                      styles.categoryChip,
+                      { borderColor: '#0288d1' },
+                      active && { backgroundColor: '#0288d1' },
+                    ]}
+                    onPress={() => setPeriodMonth(idx + 1)}
+                  >
+                    <Text style={[styles.categoryChipText, { color: active ? '#fff' : '#0288d1' }]}>
+                      {name.substring(0, 3)}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            <Text style={[styles.label, { marginTop: 14 }]}>Refill Amount (₹) *</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="e.g. 950"
+              keyboardType="numeric"
+              value={refillInput}
+              onChangeText={setRefillInput}
+            />
+
+            <TouchableOpacity
+              style={[styles.submitButton, { marginTop: 20 }]}
+              onPress={handleOnlinePaymentSheet}
+              disabled={generatingPdf}
+            >
+              {generatingPdf
+                ? <ActivityIndicator color="#fff" />
+                : <Text style={styles.submitText}>GENERATE SHEET</Text>
               }
             </TouchableOpacity>
           </View>

@@ -84,6 +84,10 @@ const PROVIDER_CONFIG: Record<FastagProvider, {
     combinedDateTime: true,
   },
 };
+// Only Fastag rows belonging to this plant are processed.
+const TARGET_PLANT = 'JALGAON LPG PLANT (3404)';
+const normalizePlant = (s: string) => s.toUpperCase().replace(/\s+/g, '');
+const TARGET_PLANT_NORM = normalizePlant(TARGET_PLANT);
 
 export default function FastagReimbursementScreen() {
   const [loading, setLoading] = useState(false);
@@ -299,7 +303,19 @@ export default function FastagReimbursementScreen() {
       }
 
       // Fallback for hyphenated format (e.g., '03-Jul-26')
-      let d = new Date(dateStr);
+      let d = new Date(NaN);
+      const dmy = dateStr.match(/^(\d{1,2})[-/. ]([A-Za-z]{3,}|\d{1,2})[-/. ](\d{2,4})$/);
+      if (dmy) {
+        const mons = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+        const month = isNaN(Number(dmy[2]))
+          ? mons.indexOf(dmy[2].toLowerCase().slice(0, 3))
+          : parseInt(dmy[2], 10) - 1;
+        let year = parseInt(dmy[3], 10);
+        if (year < 100) year += 2000;
+        d = new Date(year, month, parseInt(dmy[1], 10));
+      } else {
+        d = new Date(dateStr);
+      }
       if (isNaN(d.getTime())) {
         const parts = dateStr.split(/[-/.]/);
         if (parts.length === 3) {
@@ -396,6 +412,7 @@ export default function FastagReimbursementScreen() {
 
       let headerRowIdx = -1;
       let natureIdx = -1, amtIdx = -1, descIdx = -1, truckIdx = -1, dateIdx = -1, timeIdx = -1, closeBalIdx = -1, txIdIdx = -1;
+      let plantIdx = -1;
 
       for (let i = 0; i < rows.length; i++) {
         const row = rows[i].map((c: any) => cleanVal(c).toLowerCase());
@@ -429,6 +446,8 @@ export default function FastagReimbursementScreen() {
           closeBalIdx = findColByAliases(row, config.closingBalAliases);
 
           txIdIdx = findColByAliases(row, config.txIdAliases);
+          // "plant name" / "plant" — deliberately NOT matching "plaza"
+          plantIdx = row.findIndex((c: string) => c.includes('plant'));
 
           console.log(`[FASTAG:${fastagProvider}] Header row ${i} -> nature:${natureIdx} amount:${amtIdx} desc:${descIdx} truck:${truckIdx} date:${dateIdx} time:${timeIdx} closingBal:${closeBalIdx} txId:${txIdIdx}`);
           break;
@@ -450,6 +469,9 @@ export default function FastagReimbursementScreen() {
       }
 
       const parsed: FastagTransaction[] = [];
+      const fileHasPlant = rows.some((r) =>
+        r.some((c: any) => normalizePlant(cleanVal(c)).includes(TARGET_PLANT_NORM))
+      );
       for (let i = headerRowIdx + 1; i < rows.length; i++) {
         const row = rows[i];
         if (!row || row.length < 3) continue;
@@ -459,6 +481,13 @@ export default function FastagReimbursementScreen() {
         const truckNo = normalizeVehicleNo(row[truckIdx]);
         const rawAmount = cleanVal(row[amtIdx]);
 
+        const isTargetPlant =
+          plantIdx !== -1
+            ? normalizePlant(cleanVal(row[plantIdx])).includes(TARGET_PLANT_NORM)
+            : fileHasPlant
+              ? row.some((c: any) => normalizePlant(cleanVal(c)).includes(TARGET_PLANT_NORM))
+              : true;
+
         // Both providers' debit-indicating text contains "DEBIT" —
         // Blackbuck uses "DEBIT"/"D", Airtel uses "Toll Debit" (Activity
         // column). Airtel's credit rows ("Credit to tag from...") and
@@ -467,7 +496,7 @@ export default function FastagReimbursementScreen() {
         const isDebit = nature.includes('DEBIT') || nature === 'D';
         const isNashirabad = description.toLowerCase().includes('nashirabad');
 
-        if (isDebit && !isNashirabad && rawAmount && truckNo) {
+        if (isTargetPlant && isDebit && !isNashirabad && rawAmount && truckNo) {
           const amount = parseFloat(rawAmount.replace(/[^0-9.]/g, '')) || 0;
 
           // Prefer the raw cell value (rawRows) when it's an actual Date
@@ -511,6 +540,9 @@ export default function FastagReimbursementScreen() {
             invoiceNo: '-',
             invoiceDate: '-'
           });
+          if (parsed.length === 0) {
+              Alert.alert('No Records Found', `No valid Debit entries found for plant "${TARGET_PLANT}".`);
+            }
         }
       }
 

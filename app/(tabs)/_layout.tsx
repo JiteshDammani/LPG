@@ -11,7 +11,8 @@ import {
   Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import BottomSheet, { BottomSheetView } from '@gorhom/bottom-sheet';
+import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
+//import BottomSheet, { BottomSheetView } from '@gorhom/bottom-sheet';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import LoginScreen from './loginScreen';
 import { useDataStore } from '@/store/dataStore';
@@ -43,7 +44,7 @@ function MoreBottomSheet({
   moreItems: typeof ALL_PAGES;
 }) {
   const router = useRouter();
-  const snapPoints = useMemo(() => ['50%'], []);
+  const snapPoints = useMemo(() => ['50%', '90%'], []); // ← add a taller snap point
 
   const handleNavigate = useCallback(
     (name: string) => {
@@ -60,11 +61,15 @@ function MoreBottomSheet({
       ref={bottomSheetRef}
       index={-1}
       snapPoints={snapPoints}
+      enableDynamicSizing={false}
       enablePanDownToClose
       backgroundStyle={styles.bottomSheetBg}
       handleIndicatorStyle={styles.bottomSheetHandle}
     >
-      <BottomSheetView style={styles.bottomSheetContent}>
+      <BottomSheetScrollView
+        contentContainerStyle={styles.bottomSheetContent}
+        showsVerticalScrollIndicator={false}
+      >
         <Text style={styles.bottomSheetTitle}>More Options</Text>
         <View style={styles.moreGrid}>
           {moreItems.map((item) => (
@@ -88,7 +93,7 @@ function MoreBottomSheet({
             </TouchableOpacity>
           ))}
         </View>
-      </BottomSheetView>
+      </BottomSheetScrollView>
     </BottomSheet>
   );
 }
@@ -145,6 +150,7 @@ function AuthenticatedLayout() {
   }, [loadingPerms, pathname, firstAllowedTabName, router]);
 
   const openMore = useCallback(() => {
+    console.log('openMore called, ref:', bottomSheetRef.current);
     bottomSheetRef.current?.snapToIndex(0);
   }, []);
 
@@ -347,14 +353,14 @@ export default function TabLayout() {
   // Set native navigation bar parameters and register push notifications on mount
   useEffect(() => {
     // 1. Android Navigation Bar Setup
-    if (Platform.OS === 'android') {
+    /*if (Platform.OS === 'android') {
       const setupNavBar = async () => {
         await NavigationBar.setPositionAsync('relative');
         await NavigationBar.setBackgroundColorAsync('#ffffff');
         await NavigationBar.setButtonStyleAsync('dark');
       };
       setupNavBar();
-    }
+    }*/
 
     // 2. Request Permissions, Fetch Expo Push Token, and save to Supabase database
     const setupNotifications = async () => {

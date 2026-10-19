@@ -77,6 +77,7 @@ export default function CombinedDeliveryRecordsScreen() {
   const [partialDigital, setPartialDigital] = useState('');
   const [cashCollected, setCashCollected] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [emptyManuallyEdited, setEmptyManuallyEdited] = useState(false);
 
   // Delivery Reconciliation Bottom Sheet
   const [showReconciliation, setShowReconciliation] = useState(false);
@@ -578,7 +579,12 @@ export default function CombinedDeliveryRecordsScreen() {
               placeholder="Enter number"
               keyboardType="numeric"
               value={cylindersDelivered}
-              onChangeText={setCylindersDelivered}
+              onChangeText={(text) => {
+                setCylindersDelivered(text);
+                if (!emptyManuallyEdited) {
+                  setEmptyReceived(text);   // ← auto-fill only if user hasn't manually changed Empty
+                }
+              }}
               onFocus={() => setActiveField('delivered')}
             />
           </View>

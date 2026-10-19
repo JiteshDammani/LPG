@@ -36,6 +36,10 @@ const SKIP_PAYMENT_MODE_CATEGORIES = [
   'PRICE DIFFERENCE',
 ];
 
+// Balance records (status = false) dated on/after this date show directly in the
+// CREDIT + BALANCE checkbox list. Anything older is hidden behind "More options".
+const BALANCE_RECENT_CUTOFF_DATE = '2026-04-01';
+
 // ─── Auto-populated rate tables (editable after auto-fill) ────────────────────
 const SALE_RATES: { [key: string]: number } = {
   'SRT': 190,
@@ -188,6 +192,9 @@ export default function TransactionScreen() {
   // ── BALANCE CHECKBOX STATE ────────────────────────────────────────────────
   const [checkedBalances, setCheckedBalances]         = useState<{ [id: number]: boolean }>({});
   const [balanceInputAmounts, setBalanceInputAmounts] = useState<{ [id: number]: string }>({});
+
+  // ── CREDIT + BALANCE: "More options" toggle for older (pre-cutoff) records ─
+  const [showOlderBalanceRecords, setShowOlderBalanceRecords] = useState(false);
 
   // Balance amount confirmation popup
   const [balancePopupVisible, setBalancePopupVisible]       = useState(false);
@@ -550,6 +557,7 @@ export default function TransactionScreen() {
   useEffect(() => {
     setCheckedBalances({});
     setBalanceInputAmounts({});
+    setShowOlderBalanceRecords(false);
   }, [balanceDetails]);
 
   useEffect(() => {
@@ -583,6 +591,7 @@ export default function TransactionScreen() {
     setDiscountActuallyApplied(false);
     setCheckedBalances({});
     setBalanceInputAmounts({});
+    setShowOlderBalanceRecords(false);
     setSvNameChangeAmount(null);
     setSvNameChangeTally(0);
     setDbtlSubSelected('');
@@ -1012,6 +1021,55 @@ export default function TransactionScreen() {
   const isAutoFilled =
     selectedCategory === 'WEEKLY SALARY' ||
     (selectedType === 'CREDIT' && selectedCategory === 'BALANCE');
+
+  // ─── CREDIT + BALANCE: split pending records by BALANCE_RECENT_CUTOFF_DATE ─
+  // Records dated on/after the cutoff show directly in the list; anything
+  // older is only shown once "More options" is tapped.
+  const { recentBalanceDetails, olderBalanceDetails } = useMemo(() => {
+    const recent: any[] = [];
+    const older: any[] = [];
+    (balanceDetails || []).forEach((item: any) => {
+      if (item.date >= BALANCE_RECENT_CUTOFF_DATE) {
+        recent.push(item);
+      } else {
+        older.push(item);
+      }
+    });
+    return { recentBalanceDetails: recent, olderBalanceDetails: older };
+  }, [balanceDetails]);
+
+  // Shared row renderer for a single pending-balance checkbox row, used by
+  // both the "recent" and "older (More options)" sections below.
+  const renderBalanceCheckRow = (item: any) => {
+    const isChecked = !!checkedBalances[item.id];
+    return (
+      <View key={item.id} style={styles.balanceCheckRow}>
+        <TouchableOpacity
+          style={[styles.checkbox, isChecked && styles.checkboxChecked]}
+          onPress={() => handleBalanceCheckboxTap(item)}
+        >
+          {isChecked && <Text style={styles.checkboxTick}>✓</Text>}
+        </TouchableOpacity>
+        <View style={styles.balanceCheckInfo}>
+          <Text style={styles.balanceCheckDate}>📅 {item.date}</Text>
+          <Text style={styles.balanceCheckAmt}>
+            ₹{item.amount}
+            {item.amount_rec ? <Text style={styles.balanceCheckRec}>  (Rec: ₹{item.amount_rec})</Text> : null}
+          </Text>
+        </View>
+        {isChecked && (
+          <TextInput
+            style={styles.balanceCheckInput}
+            keyboardType="numeric"
+            value={balanceInputAmounts[item.id] || ''}
+            onChangeText={(val) =>
+              setBalanceInputAmounts(prev => ({ ...prev, [item.id]: val }))
+            }
+          />
+        )}
+      </View>
+    );
+  };
 
   // ─── FILE 2: TOTALS/LEDGER DELETIONS & BOTTOM SHEET EDIT ──────────────────
 
@@ -1496,23 +1554,31 @@ export default function TransactionScreen() {
             <Text style={styles.label}>Select Item *</Text>
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
               {['SRT', 'DPR', 'DPR-CHANGE', 'LIGHTER', 'TOP STOVE', 'STOVE', '3 BUNNER STOVE', 'OTHER'].map((item) => (
-                <TouchableOpacity
-                  key={item}
-                  style={[styles.categoryChip, selectedSalesSub === item && styles.categoryChipSelected]}
-                  onPress={() => {
-                    setSelectedSalesSub(item);
-                    setRemarks(item);
-                    if (SALE_RATES[item] !== undefined) {
-                      setRate(SALE_RATES[item].toString());
-                      setQuantity('1');
-                    } else {
-                      setRate('');
-                    }
-                  }}
-                >
-                  <Text style={[styles.categoryText, selectedSalesSub === item && styles.categoryTextSelected]}>{item}</Text>
-                </TouchableOpacity>
-              ))}
+  <TouchableOpacity
+    key={item}
+    style={[styles.categoryChip, selectedSalesSub === item && styles.categoryChipSelected]}
+    onPress={() => {
+      if (selectedSalesSub === item) {
+        // Same item tapped again — increase quantity tally
+        const newQty = (parseInt(quantity, 10) || 0) + 1;
+        setQuantity(newQty.toString());
+      } else {
+        // New item selected — reset to quantity 1
+        setSelectedSalesSub(item);
+        setRemarks(item);
+        setQuantity('1');
+        if (SALE_RATES[item] !== undefined) {
+          setRate(SALE_RATES[item].toString());
+        } else {
+          setRate('');
+        }
+      }
+    }}
+  >
+    <Text style={[styles.categoryText, selectedSalesSub === item && styles.categoryTextSelected]}>
+      {item}{selectedSalesSub === item && parseInt(quantity, 10) > 1 ? ` × ${quantity}` : ''}</Text>
+  </TouchableOpacity>
+))}
             </View>
             {selectedSalesSub !== '' && SALE_RATES[selectedSalesSub] !== undefined && (
               <Text style={styles.autoRateHint}>
@@ -1862,7 +1928,21 @@ export default function TransactionScreen() {
                       loadBalanceDetails(name, 'DEBIT');
                       fetchWeeklyDeliveryBreakdown(name);
                       const details = await loadSalaryDetails(name, selectedDate);
-                      if (details) { setRate(details.rate.toString()); setQuantity(details.quantity.toString()); }
+                      if (details) {
+                        setQuantity(details.quantity.toString());
+
+                        // Named Bonus is applied by default now — user can untick to remove it.
+                        setCheckingBonus(true);
+                        try {
+                          const isColumnPresent = await checkNameInPfSheetColumns(name);
+                          const bonus = isColumnPresent ? 6.5 : 6;
+                          setRate((details.rate + bonus).toString());
+                          setBonusApplied(true);
+                          setBonusAmountApplied(bonus);
+                        } finally {
+                          setCheckingBonus(false);
+                        }
+                      }
                     }}
                   >
                     <Text style={[styles.categoryText, selectedSalaryName === name && styles.categoryChipSelected]}>{name}</Text>
@@ -1902,37 +1982,35 @@ export default function TransactionScreen() {
             ) : (
               <>
                 <View style={styles.balanceListContainer}>
-                  {balanceDetails.map((item: any) => {
-                    const isChecked = !!checkedBalances[item.id];
-                    return (
-                      <View key={item.id} style={styles.balanceCheckRow}>
-                        <TouchableOpacity
-                          style={[styles.checkbox, isChecked && styles.checkboxChecked]}
-                          onPress={() => handleBalanceCheckboxTap(item)}
-                        >
-                          {isChecked && <Text style={styles.checkboxTick}>✓</Text>}
-                        </TouchableOpacity>
-                        <View style={styles.balanceCheckInfo}>
-                          <Text style={styles.balanceCheckDate}>📅 {item.date}</Text>
-                          <Text style={styles.balanceCheckAmt}>
-                            ₹{item.amount}
-                            {item.amount_rec ? <Text style={styles.balanceCheckRec}>  (Rec: ₹{item.amount_rec})</Text> : null}
-                          </Text>
-                        </View>
-                        {isChecked && (
-                          <TextInput
-                            style={styles.balanceCheckInput}
-                            keyboardType="numeric"
-                            value={balanceInputAmounts[item.id] || ''}
-                            onChangeText={(val) =>
-                              setBalanceInputAmounts(prev => ({ ...prev, [item.id]: val }))
-                            }
-                          />
-                        )}
-                      </View>
-                    );
-                  })}
-                </View>
+  {recentBalanceDetails.map(renderBalanceCheckRow)}
+
+  {showOlderBalanceRecords && olderBalanceDetails.map(renderBalanceCheckRow)}
+</View>
+
+{olderBalanceDetails.length > 0 && (
+  <TouchableOpacity
+    style={styles.moreOptionsBtn}
+    onPress={() => setShowOlderBalanceRecords((prev) => !prev)}
+    activeOpacity={0.8}
+  >
+    <Ionicons
+      name={showOlderBalanceRecords ? 'chevron-up' : 'ellipsis-horizontal-circle-outline'}
+      size={16}
+      color={BPCL_BLUE}
+    />
+    <Text style={styles.moreOptionsBtnText}>
+      {showOlderBalanceRecords
+        ? 'Hide older records'
+        : `More options (${olderBalanceDetails.length} older record${olderBalanceDetails.length > 1 ? 's' : ''})`}
+    </Text>
+  </TouchableOpacity>
+)}
+
+{recentBalanceDetails.length === 0 && !showOlderBalanceRecords && olderBalanceDetails.length > 0 && (
+  <Text style={styles.noInfoText}>
+    No pending records on/after {BALANCE_RECENT_CUTOFF_DATE}. Tap "More options" to see older ones.
+  </Text>
+)}
 
                 {checkedBalanceTotal > 0 && (
                   <View style={styles.deductionSummaryBox}>
@@ -1975,7 +2053,8 @@ export default function TransactionScreen() {
           </View>
         )}
 
-        {/* CREDIT + BALANCE: multi-select checkboxes */}
+        {/* CREDIT + BALANCE: multi-select checkboxes — split by BALANCE_RECENT_CUTOFF_DATE,
+            older records tucked behind "More options" */}
         {selectedType === 'CREDIT' && selectedCategory === 'BALANCE' && selectedName && (
           <View style={styles.card}>
             <Text style={styles.label}>Select Balance Records *</Text>
@@ -1986,37 +2065,35 @@ export default function TransactionScreen() {
             ) : (
               <>
                 <View style={styles.balanceListContainer}>
-                  {balanceDetails.map((item: any) => {
-                    const isChecked = !!checkedBalances[item.id];
-                    return (
-                      <View key={item.id} style={styles.balanceCheckRow}>
-                        <TouchableOpacity
-                          style={[styles.checkbox, isChecked && styles.checkboxChecked]}
-                          onPress={() => handleBalanceCheckboxTap(item)}
-                        >
-                          {isChecked && <Text style={styles.checkboxTick}>✓</Text>}
-                        </TouchableOpacity>
-                        <View style={styles.balanceCheckInfo}>
-                          <Text style={styles.balanceCheckDate}>📅 {item.date}</Text>
-                          <Text style={styles.balanceCheckAmt}>
-                            ₹{item.amount}
-                            {item.amount_rec ? <Text style={styles.balanceCheckRec}>  (Rec: ₹{item.amount_rec})</Text> : null}
-                          </Text>
-                        </View>
-                        {isChecked && (
-                          <TextInput
-                            style={styles.balanceCheckInput}
-                            keyboardType="numeric"
-                            value={balanceInputAmounts[item.id] || ''}
-                            onChangeText={(val) =>
-                              setBalanceInputAmounts(prev => ({ ...prev, [item.id]: val }))
-                            }
-                          />
-                        )}
-                      </View>
-                    );
-                  })}
+                  {recentBalanceDetails.map(renderBalanceCheckRow)}
+
+                  {showOlderBalanceRecords && olderBalanceDetails.map(renderBalanceCheckRow)}
                 </View>
+
+                {olderBalanceDetails.length > 0 && (
+                  <TouchableOpacity
+                    style={styles.moreOptionsBtn}
+                    onPress={() => setShowOlderBalanceRecords((prev) => !prev)}
+                    activeOpacity={0.8}
+                  >
+                    <Ionicons
+                      name={showOlderBalanceRecords ? 'chevron-up' : 'ellipsis-horizontal-circle-outline'}
+                      size={16}
+                      color={BPCL_BLUE}
+                    />
+                    <Text style={styles.moreOptionsBtnText}>
+                      {showOlderBalanceRecords
+                        ? 'Hide older records'
+                        : `More options (${olderBalanceDetails.length} older record${olderBalanceDetails.length > 1 ? 's' : ''})`}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+
+                {recentBalanceDetails.length === 0 && !showOlderBalanceRecords && olderBalanceDetails.length > 0 && (
+                  <Text style={styles.noInfoText}>
+                    No pending records on/after {BALANCE_RECENT_CUTOFF_DATE}. Tap "More options" to see older ones.
+                  </Text>
+                )}
 
                 {checkedBalanceTotal > 0 && (
                   <View style={[styles.deductionSummaryBox, { backgroundColor: '#e8f4f8', borderColor: BPCL_BLUE }]}>
@@ -3071,6 +3148,26 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: BPCL_BLUE,
     textAlign: 'right',
+  },
+
+  // ── "More options" toggle button for older (pre-cutoff) balance records ──
+  moreOptionsBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    marginTop: 8,
+    padding: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: BPCL_BLUE,
+    borderStyle: 'dashed',
+    backgroundColor: '#f5fbff',
+  },
+  moreOptionsBtnText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: BPCL_BLUE,
   },
 
   deductionSummaryBox: {

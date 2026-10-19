@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -12,6 +12,7 @@ import {
   ActivityIndicator,
   Modal,
   Linking,
+  PermissionsAndroid,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -31,6 +32,8 @@ const BPCL_BLUE = '#017DC5';
 const BPCL_YELLOW = '#FFDC02';
 const EMPTY_DEFAULT = '1990-01-01';
 const COUNTRY_CODE = '91'; // India only — auto-prefixed since stored numbers have no country code
+
+
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -97,6 +100,7 @@ async function sendWhatsAppForDelivery(params: {
       );
       return;
     }
+
 
     // STEP 3: Find empty cylinders received on this delivery date
     const { count: emptyCount } = await supabase
@@ -342,6 +346,9 @@ export default function CommercialScreen() {
   const [paymentModeVisible, setPaymentModeVisible] = useState(false);
   const [paymentModeSelected, setPaymentModeSelected] = useState<'CASH' | 'PAYTM' | null>(null);
 
+  const customerSearchRef = useRef<TextInput>(null);
+  const sentInputRef = useRef<TextInput>(null);
+
   // ── Delivery Boy Inline Edit State ────────────────────────────────────────
   const [editingDeliveryBoyFor, setEditingDeliveryBoyFor] = useState<{
     customer: string;
@@ -414,10 +421,28 @@ export default function CommercialScreen() {
     }
   };
 
+
+
+async function ensureBluetoothPermissions(): Promise<boolean> {
+  if (Platform.OS === 'android' && Platform.Version >= 31) {
+    const granted = await PermissionsAndroid.requestMultiple([
+      PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+      PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+    ]);
+    return (
+        granted['android.permission.BLUETOOTH_SCAN'] === PermissionsAndroid.RESULTS.GRANTED &&
+        granted['android.permission.BLUETOOTH_CONNECT'] === PermissionsAndroid.RESULTS.GRANTED
+    );
+  }
+  return true;
+}
+
   // ─── Printer: silently reconnect to whichever printer was used last ───────
 
   const reconnectSavedPrinter = async () => {
     try {
+      const hasPermission = await ensureBluetoothPermissions();
+      if (!hasPermission) return; // silently skip — user can connect manually via printer icon
       const ok = await connectToSavedPrinter();
       if (ok) {
         const saved = await getSavedPrinter();
@@ -1031,7 +1056,13 @@ export default function CommercialScreen() {
             <Text style={styles.label}>Select Customer *</Text>
             <TouchableOpacity
               style={styles.dropdownButton}
-              onPress={() => { setCustomerDropdownOpen((p) => !p); setCustomerSearch(''); }}
+              onPress={() => {
+                setCustomerDropdownOpen((p) => !p);
+                setCustomerSearch('');
+                setTimeout(() => {
+                  customerSearchRef.current?.focus();
+                }, 100);
+              }}
             >
               <Text style={[styles.dropdownButtonText, !selectedCustomer && styles.dropdownPlaceholder]}>
                 {selectedCustomer || 'Select customer...'}
@@ -1042,26 +1073,35 @@ export default function CommercialScreen() {
             {customerDropdownOpen && (
               <View style={styles.dropdownList}>
                 <TextInput
+                  ref={customerSearchRef}
                   style={styles.dropdownSearch}
                   placeholder="Search customer..."
                   value={customerSearch}
                   onChangeText={(text) => setCustomerSearch(text.toUpperCase())}
                   autoCorrect={false}
+                  autoFocus
                 />
                 <ScrollView style={{ maxHeight: 200 }} nestedScrollEnabled keyboardShouldPersistTaps="handled">
                   {customers
                     .filter((c) => c.name.toUpperCase().includes(customerSearch))
                     .map((c) => (
                       <TouchableOpacity
-                        key={c.name}
-                        style={[styles.dropdownItem, selectedCustomer === c.name && styles.dropdownItemSelected]}
-                        onPress={() => { setSelectedCustomer(c.name); setCustomerDropdownOpen(false); setCustomerSearch(''); }}
-                      >
-                        <Text style={[styles.dropdownItemText, selectedCustomer === c.name && styles.dropdownItemTextSelected]}>
-                          {c.name}
-                        </Text>
-                        {selectedCustomer === c.name && <Ionicons name="checkmark" size={16} color="#fff" />}
-                      </TouchableOpacity>
+  key={c.name}
+  style={[styles.dropdownItem, selectedCustomer === c.name && styles.dropdownItemSelected]}
+  onPress={() => {
+    setSelectedCustomer(c.name);
+    setCustomerDropdownOpen(false);
+    setCustomerSearch('');
+    setTimeout(() => {
+      sentInputRef.current?.focus();
+    }, 150);
+  }}
+>
+  <Text style={[styles.dropdownItemText, selectedCustomer === c.name && styles.dropdownItemTextSelected]}>
+    {c.name}
+  </Text>
+  {selectedCustomer === c.name && <Ionicons name="checkmark" size={16} color="#fff" />}
+</TouchableOpacity>
                     ))}
                 </ScrollView>
               </View>
@@ -1087,10 +1127,17 @@ export default function CommercialScreen() {
             {/* Sent & Received */}
             <View style={styles.row}>
               <View style={styles.halfInput}>
-                <Text style={[styles.label, { marginTop: 16 }]}>Cylinders Sent</Text>
-                <TextInput style={styles.input} placeholder="0" keyboardType="numeric" value={sent} onChangeText={setSent} />
-                <Text style={styles.hintText}>Creates new records</Text>
-              </View>
+  <Text style={[styles.label, { marginTop: 16 }]}>Cylinders Sent</Text>
+  <TextInput
+    ref={sentInputRef}
+    style={styles.input}
+    placeholder="0"
+    keyboardType="numeric"
+    value={sent}
+    onChangeText={setSent}
+  />
+  <Text style={styles.hintText}>Creates new records</Text>
+</View>
               <View style={styles.halfInput}>
                 <Text style={[styles.label, { marginTop: 16 }]}>Empty Received</Text>
                 <TextInput style={styles.input} placeholder="0" keyboardType="numeric" value={received} onChangeText={setReceived} />

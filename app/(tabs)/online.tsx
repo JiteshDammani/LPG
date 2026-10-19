@@ -91,7 +91,20 @@ function formatExcelDate(dateStr: string): string | null {
       return cleaned;
     }
 
-    const parts = cleaned.split(/[-/]/);
+    // Handle raw Excel serial date numbers (e.g. "46269.53958333333")
+    if (/^\d+(\.\d+)?$/.test(cleaned)) {
+      const serial = parseFloat(cleaned);
+      // Excel epoch is 1899-12-30 (accounts for Excel's leap-year bug)
+      const utcMillis = Math.round((serial - 25569) * 86400 * 1000);
+      const d = new Date(utcMillis);
+      if (isNaN(d.getTime())) return null;
+      const year = d.getUTCFullYear();
+      const month = (d.getUTCMonth() + 1).toString().padStart(2, '0');
+      const day = d.getUTCDate().toString().padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    }
+
+        const parts = cleaned.split(/[-/]/);
     if (parts.length === 3) {
       let day = parseInt(parts[0], 10);
       let month = parseInt(parts[1], 10);
@@ -106,12 +119,20 @@ function formatExcelDate(dateStr: string): string | null {
         if (monthMap[monStr]) {
           month = monthMap[monStr];
         } else {
-          return null;
+          return null; // unparseable — bail rather than let NaN through
         }
       }
 
+      // Defensive: if what we assumed was "month" is out of range (>12) but
+      // what we assumed was "day" is a valid month, the source was actually MM/DD/YYYY — swap.
+      if (month > 12 && day >= 1 && day <= 12) {
+        [day, month] = [month, day];
+      }
+
+      if (month < 1 || month > 12 || day < 1 || day > 31) return null; // still invalid — bail instead of inserting garbage
+
       if (year < 100) {
-        year = 2000 + year; // Convert 26 to 2026
+        year = 2000 + year;
       }
 
       const dStr = day.toString().padStart(2, '0');
@@ -300,12 +321,25 @@ export default function OnlinePaymentScreen() {
       const isXlsx = fileName.endsWith('.xlsx') || fileName.endsWith('.xls');
 
       if (isXlsx) {
-        // Read file content as Base64 using SDK 54 legacy bridge
-        const base64Content = await FileSystem.readAsStringAsync(fileUri, { encoding: FileSystem.EncodingType.Base64 });
-        const workbook = XLSX.read(base64Content, { type: 'base64' });
+        const base64Content = await FileSystem.readAsStringAsync(fileUri, {encoding: FileSystem.EncodingType.Base64});
+        const workbook = XLSX.read(base64Content, {type: 'base64', cellDates: true}); // real Date objects, no string formatting
         const firstSheetName = workbook.SheetNames[0];
         const worksheet = workbook.Sheets[firstSheetName];
-        return XLSX.utils.sheet_to_json<string[]>(worksheet, { header: 1 });
+        const rawRows = XLSX.utils.sheet_to_json<any[]>(worksheet, {header: 1}); // raw: true (default) — keeps Date objects as Date objects
+
+        // Normalize any real Date cells into unambiguous ISO strings ourselves —
+        // don't rely on xlsx's dateNF formatting, which can silently flip to MM/DD/YYYY.
+        return rawRows.map(row =>
+            row.map(cell => {
+              if (cell instanceof Date && !isNaN(cell.getTime())) {
+                const y = cell.getFullYear();
+                const m = (cell.getMonth() + 1).toString().padStart(2, '0');
+                const d = cell.getDate().toString().padStart(2, '0');
+                return `${y}-${m}-${d}`;
+              }
+              return cell;
+            })
+        );
       } else {
         // Read file content as string using SDK 54 legacy bridge
         const fileContent = await FileSystem.readAsStringAsync(fileUri);
@@ -436,108 +470,139 @@ export default function OnlinePaymentScreen() {
   };
 
   // ── Handle Advance Payment (Zero Bills / Multi-Table Sheet) Upload ────────
-  const handleAdvanceCSVUpload = async () => {
-    const rows = await pickAndParseFile();
-    if (!rows || rows.length === 0) return;
+  // ── Handle Advance Payment (Zero Bills / Multi-Table Sheet) Upload ────────
+// ── Handle Advance Payment (Zero Bills / Multi-Table Sheet) Upload ────────
+const handleAdvanceCSVUpload = async () => {
+  const rows = await pickAndParseFile();
+  if (!rows || rows.length === 0) return;
 
-    setCsvProcessing(true);
-    try {
-      let currentMode: 'TABLE_1' | 'TABLE_2' | null = null;
-      let t1AmtIdx = -1, t1DateIdx = -1;
-      let t2AmtIdx = -1, t2DateIdx = -1;
+  setCsvProcessing(true);
+  try {
+    let currentMode: 'TABLE_1' | 'TABLE_2' | null = null;
+    let t1AmtIdx = -1, t1DateIdx = -1;
+    let t2AmtIdx = -1, t2DateIdx = -1;
 
-      const aggregates: { [date: string]: number } = {};
+    let sawTable1Marker = false;
+    let sawTable2Marker = false;
+    let sawUnresolvedColumns = false;
 
-      for (const row of rows) {
-        if (!row || row.length === 0) continue;
+    // Diagnostics
+    let rowsSeen = 0;
+    let blankAmt = 0;
+    let blankDate = 0;
+    let dateParseFailed = 0;
+    let sampleSkipped: string[] = [];
 
-        // Convert row columns to cleaned values for comparison
-        const cleanedRow = row.map(c => cleanVal(c));
+    const aggregates: { [date: string]: number } = {};
 
-        // Table 1 marker detection
-        if (cleanedRow.includes('SrNo')) {
-          currentMode = 'TABLE_1';
-          t1AmtIdx = cleanedRow.findIndex(c => c.toLowerCase().includes('advtotala'));
-          t1DateIdx = cleanedRow.findIndex(c => c.toLowerCase().includes('deliveryda'));
+    for (const row of rows) {
+      if (!row || row.length === 0) continue;
+      const cleanedRow = row.map(c => cleanVal(c));
+      const normalizedCells = cleanedRow.map(c => c.toUpperCase());
+
+      if (normalizedCells.includes('SRNO')) {
+        sawTable1Marker = true;
+        t1AmtIdx = cleanedRow.findIndex(c => c.toLowerCase().includes('advtotala'));
+        t1DateIdx = cleanedRow.findIndex(c => c.toLowerCase().includes('deliveryda'));
+        currentMode = (t1AmtIdx === -1 || t1DateIdx === -1) ? (sawUnresolvedColumns = true, null) : 'TABLE_1';
+        continue;
+      }
+
+      if (normalizedCells.includes('SRNO2')) {
+        sawTable2Marker = true;
+        t2AmtIdx = cleanedRow.findIndex(c => c && (c.toLowerCase().includes('advtotalia') || c.toLowerCase().includes('advtotala')));
+        t2DateIdx = cleanedRow.findIndex(c => c.toLowerCase().includes('deliveryda'));
+        currentMode = (t2AmtIdx === -1 || t2DateIdx === -1) ? (sawUnresolvedColumns = true, null) : 'TABLE_2';
+        continue;
+      }
+
+      const amtIdx = currentMode === 'TABLE_1' ? t1AmtIdx : currentMode === 'TABLE_2' ? t2AmtIdx : -1;
+      const dateIdx = currentMode === 'TABLE_1' ? t1DateIdx : currentMode === 'TABLE_2' ? t2DateIdx : -1;
+
+      if (currentMode && amtIdx !== -1 && dateIdx !== -1) {
+        rowsSeen++;
+        const amtStr = cleanedRow[amtIdx];
+        const dateStr = cleanedRow[dateIdx];
+
+        if (!amtStr) { blankAmt++; if (sampleSkipped.length < 3) sampleSkipped.push(`row amt blank | date="${dateStr}"`); continue; }
+        if (!dateStr || dateStr.toLowerCase().includes('date')) { blankDate++; if (sampleSkipped.length < 3) sampleSkipped.push(`row date blank/header-like | amt="${amtStr}"`); continue; }
+
+        const amt = parseFloat(amtStr.replace(/[^0-9.]/g, '')) || 0;
+        const normalizedDate = formatExcelDate(dateStr);
+        if (!normalizedDate) {
+          dateParseFailed++;
+          if (sampleSkipped.length < 3) sampleSkipped.push(`date parse failed | raw="${dateStr}"`);
           continue;
         }
 
-        // Table 2 marker detection
-        if (cleanedRow.includes('SrNo2')) {
-          currentMode = 'TABLE_2';
-          t2AmtIdx = cleanedRow.findIndex(c => c && (c.toLowerCase().includes('advtotalia') || c.toLowerCase().includes('advtotala')));
-          t2DateIdx = cleanedRow.findIndex(c => c.toLowerCase().includes('deliveryda'));
+        const effectiveDate = getEffectiveReportingDate(normalizedDate);
+        aggregates[effectiveDate] = (aggregates[effectiveDate] || 0) + amt;
+      }
+    }
+
+        const parsedDates = Object.keys(aggregates);
+    if (parsedDates.length === 0) {
+      if (!sawTable1Marker && !sawTable2Marker) {
+        Alert.alert('Error', 'Could not find the SrNo / SrNo2 table markers in this file.');
+      } else if (sawUnresolvedColumns) {
+        Alert.alert('Error', 'Found headers, but could not identify the AdvTotalAmount / DeliveryDate columns.');
+      } else {
+        Alert.alert(
+          'Debug: No Rows Parsed',
+          `Rows evaluated: ${rowsSeen}\nBlank amount: ${blankAmt}\nBlank/header-like date: ${blankDate}\nDate parse failed: ${dateParseFailed}\n\nSamples:\n${sampleSkipped.join('\n')}`
+        );
+      }
+      return;
+    }
+
+    // Check conflicts sequentially, same as the Paytm upload
+    for (const targetDate of parsedDates) {
+      const sumCylinder = Math.round(aggregates[targetDate]);
+
+      const { data: existingData } = await supabase
+        .from('dashboard_onlinepaymentdetails')
+        .select('id, no_of_cylinder')
+        .eq('date', targetDate)
+        .eq('type', 'ZERO BILL');
+
+      if (existingData && existingData.length > 0) {
+        const oldRecord = existingData[0];
+
+        // Skip the prompt entirely if the new total matches what's already there
+        if (Math.round(oldRecord.no_of_cylinder) === sumCylinder) {
           continue;
         }
 
-        // Parse Table 1 values
-        if (currentMode === 'TABLE_1' && t1AmtIdx !== -1 && t1DateIdx !== -1) {
-          const amtStr = cleanedRow[t1AmtIdx];
-          const dateStr = cleanedRow[t1DateIdx];
-          if (amtStr && dateStr && !dateStr.toLowerCase().includes('date')) {
-            const amt = parseFloat(amtStr.replace(/[^0-9.]/g, '')) || 0;
-            const normalizedDate = formatExcelDate(dateStr);
-            if (normalizedDate) {
-              // Sunday Shift Check: if Sunday, shift to next Monday
-              const effectiveDate = getEffectiveReportingDate(normalizedDate);
-              aggregates[effectiveDate] = (aggregates[effectiveDate] || 0) + amt;
-            }
-          }
+        const shouldOverwrite = await confirmOverwritePrompt(targetDate, oldRecord.no_of_cylinder, sumCylinder);
+        if (!shouldOverwrite) {
+          continue; // leave the existing value untouched
         }
 
-        // Parse Table 2 values
-        if (currentMode === 'TABLE_2' && t2AmtIdx !== -1 && t2DateIdx !== -1) {
-          const amtStr = cleanedRow[t2AmtIdx];
-          const dateStr = cleanedRow[t2DateIdx];
-          if (amtStr && dateStr && !dateStr.toLowerCase().includes('date')) {
-            const amt = parseFloat(amtStr.replace(/[^0-9.]/g, '')) || 0;
-            const normalizedDate = formatExcelDate(dateStr);
-            if (normalizedDate) {
-              // Sunday Shift Check: if Sunday, shift to next Monday
-              const effectiveDate = getEffectiveReportingDate(normalizedDate);
-              aggregates[effectiveDate] = (aggregates[effectiveDate] || 0) + amt;
-            }
-          }
-        }
-      }
-
-      const parsedDates = Object.keys(aggregates);
-      if (parsedDates.length === 0) {
-        Alert.alert('Info', 'Could not locate any matching transaction headers inside this Advance Payment file.');
-        return;
-      }
-
-      // Upsert calculations to dashboard_onlinepaymentdetails (Delete and Insert strategy to bypass Supabase ON CONFLICT constraint error)
-      for (const targetDate of parsedDates) {
-        const sumCylinder = aggregates[targetDate];
-
-        // 1. Delete any existing record for this targetDate and type
-        await supabase
+        const { error: updErr } = await supabase
           .from('dashboard_onlinepaymentdetails')
-          .delete()
-          .eq('date', targetDate)
-          .eq('type', 'ZERO BILL');
-
-        // 2. Insert the fresh calculated sum rounded to nearest integer with type 'ZERO BILL'
-        const { error } = await supabase
+          .update({ no_of_cylinder: sumCylinder })
+          .eq('id', oldRecord.id);
+        if (updErr) throw updErr;
+      } else {
+        const { error: insErr } = await supabase
           .from('dashboard_onlinepaymentdetails')
           .insert({
             date: targetDate,
-            no_of_cylinder: Math.round(sumCylinder),
-            type: 'ZERO BILL'
+            no_of_cylinder: sumCylinder,
+            type: 'ZERO BILL',
           });
-
-        if (error) throw error;
+        if (insErr) throw insErr;
       }
-
-      Alert.alert('Success', 'Advance Payment tables merged and updated successfully.');
-      await loadData();
-    } catch (err: any) {
-      Alert.alert('Upload Error', err?.message || 'Failed to parse Advance Payment tables.');
-    } finally {
-      setCsvProcessing(false);
     }
-  };
+
+    Alert.alert('Success', 'Advance Payment tables merged and updated successfully.');
+    await loadData();
+  } catch (err: any) {
+    Alert.alert('Upload Error', err?.message || 'Failed to parse Advance Payment tables.');
+  } finally {
+    setCsvProcessing(false);
+  }
+};
 
   // ── Calculations ──
   const extraOnlineQty = extraOnlineEntries.reduce((s, e) => s + e.qty, 0);

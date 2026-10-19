@@ -21,7 +21,7 @@ export const ALL_PAGES = [
   { name: 'stock',             label: 'Stock',              icon: 'cube-outline'          as const, color: '#f59e0b', defaultSort: 4  }, // Amber
   { name: 'online',            label: 'Online',             icon: 'globe-outline'         as const, color: '#8b5cf6', defaultSort: 5  }, // Violet
   { name: 'summary',           label: 'Stock Summary',      icon: 'analytics-outline'     as const, color: '#a855f7', defaultSort: 6  }, // Purple
-  { name: 'records',           label: 'Daily Records',      icon: 'calendar-outline'      as const, color: '#059669', defaultSort: 7  }, // Dark Emerald
+  { name: 'hotplatestockscreen', label: 'Hot Plate Stock',      icon: 'flame-outline'      as const, color: '#059669', defaultSort: 7  }, // Dark Emerald
   { name: 'totals',            label: 'Totals',             icon: 'calculator-outline'    as const, color: '#ea580c', defaultSort: 8  }, // Deep Orange
   { name: 'pfsheet',           label: 'PF Sheet',           icon: 'newspaper-outline'     as const, color: '#dc2626', defaultSort: 9  }, // Crimson
   { name: 'weeklysalary',      label: 'Weekly Salary',      icon: 'cash-outline'          as const, color: '#0d9488', defaultSort: 10 }, // Teal

@@ -22,12 +22,49 @@ import { useRole } from '../../hooks/useRole';
 const BPCL_BLUE = '#017DC5';
 const BPCL_YELLOW = '#FFDC02';
 
+// ─── 14KG ↔ 19KG Lorry Prediction ──────────────────────────────────────────
+// A lorry has 25 rows total; each row carries EITHER 21 × 14.2KG cylinders
+// OR 14 × 19KG cylinders (rows are never mixed). Below 483 (14.2KG qty) the
+// lorry only carries 24 total rows instead of 25 — confirmed against real
+// lorry data (504→14, 483→28, 441→42, 420→56, 525→0).
+const LORRY_ROW_14KG = 21;
+const LORRY_ROW_19KG = 14;
+const LORRY_THRESHOLD_14KG = 483; // at/above this, lorry = 25 rows; below, 24 rows
+
+const predictLorrySplit = (
+  qty14: number
+): { rows14: number; rows19: number; qty19: number } | null => {
+  if (!qty14 || qty14 <= 0) return null;
+  if (qty14 % LORRY_ROW_14KG !== 0) return null; // not a clean multiple — can't predict
+  const rows14 = qty14 / LORRY_ROW_14KG;
+  const totalRows = qty14 >= LORRY_THRESHOLD_14KG ? 25 : 24;
+  const rows19 = totalRows - rows14;
+  if (rows19 < 0) return null; // more 14KG rows than the lorry can hold
+  return { rows14, rows19, qty19: rows19 * LORRY_ROW_19KG };
+};
+
+const predict19FromQty14 = (qty14Str: string): number | null => {
+  const qty14 = parseInt(qty14Str, 10);
+  if (isNaN(qty14)) return null;
+  if (qty14 === 0) return 0;
+  const split = predictLorrySplit(qty14);
+  return split ? split.qty19 : null;
+};
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 //
 // NOTE (schema): dashboard_godownftlstocksachin needs `refill` and
 // `new_connection` columns added (same names/types as the existing columns
 // on dashboard_officeftlstocksachin) before Save can write the Godown split.
 // This is a one-time manual Supabase migration — no code here creates columns.
+//
+// NOTE (schema): dashboard_lorrytracker is a NEW table this screen needs,
+// used for 14KG→19KG lorry prediction + the "pending lorry" reminder:
+//   id (identity/bigint), date (date), qty_14kg (int), qty_19kg (int),
+//   rows_14 (int, nullable), rows_19 (int, nullable),
+//   sent_to_plant (bool, default false), sent_date (date, nullable),
+//   actual_sent_14 (int, nullable), actual_sent_19 (int, nullable)
+// This is a one-time manual Supabase migration — no code here creates the table.
 
 type Product = '14.2 KG Cylinder' | '19 KG Cylinder' | '5 KG Cylinder';
 
@@ -35,6 +72,24 @@ interface BorrowEntry {
   party_name: string;
   full_qty: string;
   empty_qty: string;
+}
+
+interface LorryEntry {
+  id: string;
+  qty14: string;
+}
+
+interface LorryTrackerRow {
+  id: number;
+  date: string;
+  qty_14kg: number;
+  qty_19kg: number;
+  rows_14: number | null;
+  rows_19: number | null;
+  sent_to_plant: boolean;
+  sent_date: string | null;
+  actual_sent_14: number | null;
+  actual_sent_19: number | null;
 }
 
 interface TransferEntry {
@@ -180,6 +235,22 @@ export default function StockScreen() {
   const [emptyToPlant142, setEmptyToPlant142] = useState('');
   const [stock142, setStock142] = useState<Stock142 | null>(null);
 
+  // ── Lorry Tracking (14.2 KG ↔ 19 KG prediction) ────────────────────────────
+  // Multiple lorries can arrive in one day, so "Received from Plant" for
+  // 14.2 KG is a repeatable list; each entry predicts its own 19KG split.
+  const [lorryEntries14, setLorryEntries14] = useState<LorryEntry[]>([
+    { id: 'lorry-0', qty14: '' },
+  ]);
+  const [pendingLorries, setPendingLorries] = useState<LorryTrackerRow[]>([]);
+  const [selectedSentLorryIds, setSelectedSentLorryIds] = useState<Set<number>>(
+    new Set()
+  );
+
+  const totalReceived14FromLorries = lorryEntries14.reduce(
+    (sum, e) => sum + (parseInt(e.qty14, 10) || 0),
+    0
+  );
+
   // ── 19 KG State ────────────────────────────────────────────────────────────
   const [receivedFromPlant19, setReceivedFromPlant19] = useState('');
   const [emptyToPlant19, setEmptyToPlant19] = useState('');
@@ -221,6 +292,8 @@ export default function StockScreen() {
     setReceivedFromPlant142('');
     setEmptyToPlant142('');
     setStock142(null);
+    setLorryEntries14([{ id: 'lorry-0', qty14: '' }]);
+    setSelectedSentLorryIds(new Set());
     setReceivedFromPlant19('');
     setEmptyToPlant19('');
     setStock19(null);
@@ -268,6 +341,113 @@ export default function StockScreen() {
     resetAll();
     setSelectedProduct(null);
   };
+
+  // ─── Lorry Entry Handlers (14.2 KG) ────────────────────────────────────────
+
+  const addLorryEntry14 = () => {
+    setLorryEntries14((prev) => [
+      ...prev,
+      { id: `lorry-${Date.now()}`, qty14: '' },
+    ]);
+  };
+
+  const updateLorryEntry14 = (id: string, qty14: string) => {
+    setLorryEntries14((prev) =>
+      prev.map((e) => (e.id === id ? { ...e, qty14 } : e))
+    );
+  };
+
+  const removeLorryEntry14 = (id: string) => {
+    setLorryEntries14((prev) =>
+      prev.length > 1 ? prev.filter((e) => e.id !== id) : prev
+    );
+  };
+
+  // Keep receivedFromPlant142 / emptyToPlant142 (used by the rest of the
+  // screen's calc + save logic) in sync with the lorry list total — mirrors
+  // the old single-field "real-time copy" behavior, just driven by the sum.
+  // Left blank (not "0") when no lorry qty has been entered yet, so the
+  // input placeholder still shows normally.
+  useEffect(() => {
+    if (selectedProduct !== '14.2 KG Cylinder') return;
+    const totalStr =
+      totalReceived14FromLorries > 0 ? String(totalReceived14FromLorries) : '';
+    setReceivedFromPlant142(totalStr);
+    setEmptyToPlant142(totalStr);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [totalReceived14FromLorries, selectedProduct]);
+
+  // ─── Pending Lorry Reminders ────────────────────────────────────────────────
+
+  const fetchPendingLorries = useCallback(async () => {
+    const { data, error } = await supabase
+      .from('dashboard_lorrytracker')
+      .select('*')
+      .eq('sent_to_plant', false)
+      .order('date', { ascending: true });
+    if (error) throw error;
+    setPendingLorries((data || []) as LorryTrackerRow[]);
+  }, []);
+
+  useEffect(() => {
+    if (selectedProduct === '14.2 KG Cylinder') {
+      fetchPendingLorries().catch((err) =>
+        console.error('Failed to fetch pending lorries:', err?.message || err)
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedProduct]);
+
+  // Ticking a reminder sets "Sent to Plant" to the sum of every currently
+  // ticked lorry's qty_14kg — recomputed fresh each time so toggle order
+  // never matters. Still editable afterward if the real sent qty differs.
+  const toggleSentLorry = (lorry: LorryTrackerRow) => {
+    setSelectedSentLorryIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(lorry.id)) next.delete(lorry.id);
+      else next.add(lorry.id);
+      const newSentTotal = pendingLorries
+        .filter((l) => next.has(l.id))
+        .reduce((sum, l) => sum + l.qty_14kg, 0);
+      setEmptyToPlant142(String(newSentTotal));
+      return next;
+    });
+  };
+
+  // ─── 19 KG: Prefill from today's Lorry Tracker entries ─────────────────────
+  // Received = sum of predicted qty_19kg for every lorry logged today.
+  // Sent = sum of actual_sent_19 for lorries marked sent today (from the
+  // 14.2KG screen's reminder checkboxes). Both stay editable after prefill.
+
+  const fetchLorryPredictionsFor19KG = useCallback(async () => {
+    const { data, error } = await supabase
+      .from('dashboard_lorrytracker')
+      .select('qty_19kg, actual_sent_19, sent_to_plant, sent_date')
+      .eq('date', TODAY);
+    if (error) throw error;
+    const rows = data || [];
+    const totalPredictedReceived19 = rows.reduce(
+      (sum: number, r: any) => sum + (r.qty_19kg || 0),
+      0
+    );
+    const totalPredictedSent19 = rows
+      .filter((r: any) => r.sent_to_plant && r.sent_date === TODAY)
+      .reduce((sum: number, r: any) => sum + (r.actual_sent_19 || 0), 0);
+    setReceivedFromPlant19(String(totalPredictedReceived19));
+    setEmptyToPlant19(String(totalPredictedSent19));
+  }, [TODAY]);
+
+  useEffect(() => {
+    if (selectedProduct === '19 KG Cylinder' && currentStep === 1) {
+      fetchLorryPredictionsFor19KG().catch((err) =>
+        console.error(
+          'Failed to prefill 19KG from lorry tracker:',
+          err?.message || err
+        )
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedProduct]);
 
   // ─── 5KG: Auto-fetch Refill/NC totals for the selected date ───────────────
   // Filters by TODAY (the date-picker's selected date), matching every other
@@ -635,11 +815,10 @@ export default function StockScreen() {
   // applied to the Office leg only. Godown's closing figures are driven
   // purely by BPCL receipts, transfers, and its Refill/NC split.
   //
-  // EMPTY RETURN RULE: the empty cylinders collected on a refill delivery
-  // physically come back to Godown regardless of whether the full cylinder
-  // was billed against the Office or Godown portion — so the FULL refill
-  // total's empty return goes to Godown, and Office's empty side does NOT
-  // get any refill-return addition.
+  // EMPTY RETURN RULE (proportional):
+  //   • Godown-sourced refill (godownRefillY) → empty returns to Godown
+  //   • Office-sourced refill (officeRefillPortion) → empty returns to Office
+  // NC does NOT generate an empty return (new connection = full out, no empty in).
 
   // eslint-disable-next-line react-hooks/rules-of-hooks
   const get5KGCalculations = useCallback(() => {
@@ -683,28 +862,28 @@ export default function StockScreen() {
       fromBpcl +
       godownFullDelta -
       godownRefillY -
-      godownNCY;
+      godownNCY+
+      borrowedFull;
 
-    // All refill empty returns (Office portion + Godown portion) land on
-    // Godown, not just Godown's own Y portion.
+    // Only Godown-sourced refill empty returns to Godown
     const godownClosingEmpty =
       stockGodown.opening_empty -
       emptyToPlant +
       godownEmptyDelta +
-      totalRefillNum;
+      godownRefillY +
+      borrowedEmpty;
 
     const officeClosingFull =
       stockOffice.opening_full +
       officeFullDelta -
       officeRefillPortion -
-      officeNCPortion +
-      borrowedFull;
+      officeNCPortion;
 
-    // No refill-return addition on Office's empty side — it all goes to Godown.
+    // Office-sourced refill empty returns to Office
     const officeClosingEmpty =
       stockOffice.opening_empty +
       officeEmptyDelta +
-      borrowedEmpty;
+      officeRefillPortion;
 
     return {
       godownClosingFull,
@@ -808,6 +987,57 @@ export default function StockScreen() {
             remarks: remarks || '',
           }]);
         if (error) throw error;
+
+        // Log each lorry received today into the tracker (for future
+        // pending-lorry reminders + 19KG auto-prefill).
+        const newLorryRows = lorryEntries14
+          .filter((e) => (parseInt(e.qty14, 10) || 0) > 0)
+          .map((e) => {
+            const qty14 = parseInt(e.qty14, 10) || 0;
+            const split = predictLorrySplit(qty14);
+            return {
+              date: TODAY,
+              qty_14kg: qty14,
+              qty_19kg: split?.qty19 ?? 0,
+              rows_14: split?.rows14 ?? null,
+              rows_19: split?.rows19 ?? null,
+              sent_to_plant: false,
+              sent_date: null,
+              actual_sent_14: null,
+              actual_sent_19: null,
+            };
+          });
+
+        if (newLorryRows.length > 0) {
+          const { error: lorryInsertErr } = await supabase
+            .from('dashboard_lorrytracker')
+            .insert(newLorryRows);
+          if (lorryInsertErr) throw lorryInsertErr;
+        }
+
+        // Mark any reminder lorries the user ticked off as sent.
+        // NOTE (assumption): actual_sent defaults to the lorry's own
+        // received qty (the "max case" — the full lorry goes back). If the
+        // real sent qty differs, the edited "Empty Cylinders Sent to Plant"
+        // value above still drives the actual closing-stock calc; it just
+        // isn't split back per-lorry here when several are ticked at once.
+        if (selectedSentLorryIds.size > 0) {
+          const toMark = pendingLorries.filter((l) =>
+            selectedSentLorryIds.has(l.id)
+          );
+          for (const lorry of toMark) {
+            const { error: lorryUpdateErr } = await supabase
+              .from('dashboard_lorrytracker')
+              .update({
+                sent_to_plant: true,
+                sent_date: TODAY,
+                actual_sent_14: lorry.qty_14kg,
+                actual_sent_19: lorry.qty_19kg,
+              })
+              .eq('id', lorry.id);
+            if (lorryUpdateErr) throw lorryUpdateErr;
+          }
+        }
       }
 
       // ── 19 KG ─────────────────────────────────────────────────────────────
@@ -922,22 +1152,99 @@ export default function StockScreen() {
 
         {selectedProduct === '14.2 KG Cylinder' && (
           <>
-            <Text style={styles.label}>Cylinders Received from Plant</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="0"
-              keyboardType="numeric"
-              value={receivedFromPlant142}
-              onChangeText={(v) => {
-                setReceivedFromPlant142(v);
-                // Real-time copy: sent-to-plant is usually the same qty as
-                // received (equal empties go back). Still editable after —
-                // it just gets re-synced if "received" changes again later.
-                setEmptyToPlant142(v);
-              }}
-            />
+            {pendingLorries.length > 0 && (
+              <View style={styles.impactCard}>
+                <Text style={styles.impactTitle}>
+                  ⚠️ Lorries Not Yet Sent to Plant
+                </Text>
+                {pendingLorries.map((lorry) => (
+                  <TouchableOpacity
+                    key={lorry.id}
+                    style={styles.checkboxRow}
+                    onPress={() => toggleSentLorry(lorry)}
+                  >
+                    <Ionicons
+                      name={
+                        selectedSentLorryIds.has(lorry.id)
+                          ? 'checkbox'
+                          : 'square-outline'
+                      }
+                      size={20}
+                      color={BPCL_BLUE}
+                    />
+                    <Text style={styles.checkboxLabel}>
+                      {format(new Date(lorry.date + 'T00:00:00'), 'dd MMM')}:{' '}
+                      {lorry.qty_14kg} × 14KG ({lorry.qty_19kg} × 19KG)
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+                <Text style={styles.hintText}>
+                  Tick a lorry once it's actually sent back — its quantity
+                  fills "Empty Cylinders Sent to Plant" below (still
+                  editable).
+                </Text>
+              </View>
+            )}
+
+            <Text style={styles.label}>Lorries Received Today (14.2 KG)</Text>
+            {lorryEntries14.map((entry, idx) => {
+              const q = parseInt(entry.qty14, 10) || 0;
+              const predicted19 = predict19FromQty14(entry.qty14);
+              return (
+                <View key={entry.id} style={styles.transferCard}>
+                  <View style={styles.transferHeader}>
+                    <Text style={styles.transferTitle}>Lorry {idx + 1}</Text>
+                    {lorryEntries14.length > 1 && (
+                      <TouchableOpacity
+                        onPress={() => removeLorryEntry14(entry.id)}
+                      >
+                        <Ionicons
+                          name="close-circle"
+                          size={22}
+                          color="#e74c3c"
+                        />
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                  <Text style={styles.label}>Qty 14.2 KG Received</Text>
+                  <TextInput
+                    style={styles.input}
+                    placeholder="e.g. 504"
+                    keyboardType="numeric"
+                    value={entry.qty14}
+                    onChangeText={(v) => updateLorryEntry14(entry.id, v)}
+                  />
+                  {q > 0 &&
+                    (predicted19 === null ? (
+                      <Text style={[styles.hintText, { color: '#e74c3c' }]}>
+                        Not a clean multiple of 21 — 19KG can't be
+                        auto-predicted for this lorry
+                      </Text>
+                    ) : (
+                      <Text style={styles.splitPreviewText}>
+                        → Predicts {predicted19} × 19 KG in this lorry
+                      </Text>
+                    ))}
+                </View>
+              );
+            })}
+            <TouchableOpacity
+              style={styles.addReasonButton}
+              onPress={addLorryEntry14}
+            >
+              <Ionicons name="add-circle-outline" size={24} color={BPCL_BLUE} />
+              <Text style={styles.addReasonText}>Add Another Lorry</Text>
+            </TouchableOpacity>
+            <Text style={[styles.hintText, { marginTop: 6 }]}>
+              Total Received from Plant: {totalReceived14FromLorries}
+            </Text>
+
             <Text style={[styles.label, { marginTop: 16 }]}>
               Empty Cylinders Sent to Plant
+            </Text>
+            <Text style={styles.hintText}>
+              Auto-filled from received total / ticked lorries above —
+              editable
             </Text>
             <TextInput
               style={styles.input}
@@ -952,6 +1259,9 @@ export default function StockScreen() {
         {selectedProduct === '19 KG Cylinder' && (
           <>
             <Text style={styles.label}>Cylinders Received from Plant</Text>
+            <Text style={styles.hintText}>
+              Auto-predicted from today's 14.2KG lorry entries — editable
+            </Text>
             <TextInput
               style={styles.input}
               placeholder="0"
@@ -1290,12 +1600,14 @@ export default function StockScreen() {
 
               const baseGodownFull =
                 stockGodown.opening_full + fromBpcl - godownRefillY - godownNCY;
-              // All refill empties (Office + Godown portion) return to Godown.
+              // Only Godown-sourced refill empty returns to Godown
               const baseGodownEmpty =
-                stockGodown.opening_empty - emptyToPlant + totalRefillNum;
+                stockGodown.opening_empty - emptyToPlant + godownRefillY;
               const baseOfficeFull =
                 stockOffice.opening_full - officeRefillPortion - officeNCPortion;
-              const baseOfficeEmpty = stockOffice.opening_empty;
+              // Office-sourced refill empty returns to Office
+              const baseOfficeEmpty =
+                stockOffice.opening_empty + officeRefillPortion;
 
               return (
                 <>
@@ -1316,7 +1628,7 @@ export default function StockScreen() {
                   />
                   <CalcRow label="Opening Empty:" value={stockGodown.opening_empty} />
                   <CalcRow label="- Sent to Plant:" value={emptyToPlant} />
-                  <CalcRow label="+ Refill Return (all, Office + Godown):" value={totalRefillNum} />
+                  <CalcRow label="+ Godown Refill Return:" value={godownRefillY} />
                   <CalcRow
                     label="Base Godown Empty:"
                     value={baseGodownEmpty}
@@ -1340,9 +1652,7 @@ export default function StockScreen() {
                     color={baseOfficeFull < 0 ? '#e74c3c' : BPCL_BLUE}
                   />
                   <CalcRow label="Opening Empty:" value={stockOffice.opening_empty} />
-                  <Text style={styles.noteText}>
-                    * Refill empty returns go to Godown, not Office
-                  </Text>
+                  <CalcRow label="+ Office Refill Return:" value={officeRefillPortion} />
                   <CalcRow
                     label="Base Office Empty:"
                     value={baseOfficeEmpty}
@@ -1561,7 +1871,7 @@ export default function StockScreen() {
         />
         {is5KG && (
           <Text style={styles.hintText}>
-            Applies to Office stock (customer-facing borrow/give)
+            Applies to Godown stock
           </Text>
         )}
 
@@ -1881,6 +2191,13 @@ export default function StockScreen() {
                     />
                     <ModalRow label="- Godown Refill:" value={combined.godownRefillSplitVal} />
                     <ModalRow label="- Godown NC:" value={combined.godownNCSplitVal} />
+                    {borrowedFull !== 0 && (
+                      <ModalRow
+                        label="± Borrow/Give Full:"
+                        value={`${borrowedFull > 0 ? '+' : ''}${borrowedFull}`}
+                        color={borrowedFull > 0 ? '#27ae60' : '#e74c3c'}
+                      />
+                    )}
                     <ModalRowFinal
                       label="Godown Closing Full:"
                       value={combined.godownClosingFull}
@@ -1898,9 +2215,16 @@ export default function StockScreen() {
                         .reduce((sum, t) => sum + (parseInt(t.quantity, 10) || 0), 0)}
                     />
                     <ModalRow
-                      label="+ Refill Return (all, Office + Godown):"
-                      value={combined.officeRefillPortion + combined.godownRefillSplitVal}
+                      label="+ Godown Refill Return:"
+                      value={combined.godownRefillSplitVal}
                     />
+                    {borrowedEmpty !== 0 && (
+                      <ModalRow
+                        label="± Borrow/Give Empty:"
+                        value={`${borrowedEmpty > 0 ? '+' : ''}${borrowedEmpty}`}
+                        color={borrowedEmpty > 0 ? '#27ae60' : '#e74c3c'}
+                      />
+                    )}
                     <ModalRowFinal
                       label="Godown Closing Empty:"
                       value={combined.godownClosingEmpty}
@@ -1919,13 +2243,7 @@ export default function StockScreen() {
                     />
                     <ModalRow label="- Office Refill:" value={combined.officeRefillPortion} />
                     <ModalRow label="- Office NC:" value={combined.officeNCPortion} />
-                    {borrowedFull !== 0 && (
-                      <ModalRow
-                        label="± Borrow/Give Full:"
-                        value={`${borrowedFull > 0 ? '+' : ''}${borrowedFull}`}
-                        color={borrowedFull > 0 ? '#27ae60' : '#e74c3c'}
-                      />
-                    )}
+
                     <ModalRowFinal
                       label="Office Closing Full:"
                       value={combined.officeClosingFull}
@@ -1938,13 +2256,11 @@ export default function StockScreen() {
                         .filter((t) => t.direction === 'office_to_godown' && t.type === 'empty')
                         .reduce((sum, t) => sum + (parseInt(t.quantity, 10) || 0), 0)}
                     />
-                    {borrowedEmpty !== 0 && (
-                      <ModalRow
-                        label="± Borrow/Give Empty:"
-                        value={`${borrowedEmpty > 0 ? '+' : ''}${borrowedEmpty}`}
-                        color={borrowedEmpty > 0 ? '#27ae60' : '#e74c3c'}
-                      />
-                    )}
+                    <ModalRow
+                      label="+ Office Refill Return:"
+                      value={combined.officeRefillPortion}
+                    />
+
                     <ModalRowFinal
                       label="Office Closing Empty:"
                       value={combined.officeClosingEmpty}
@@ -2019,20 +2335,6 @@ export default function StockScreen() {
             </Text>
             <Ionicons name="chevron-down" size={12} color="rgba(255,255,255,0.9)" />
           </TouchableOpacity>
-
-          {showDatePicker && (
-            <DateTimePicker
-              value={new Date(selectedDate + 'T00:00:00')}
-              mode="date"
-              display="default"
-              onChange={(event: any, date?: Date) => {
-                setShowDatePicker(false);
-                if (event.type === 'set' && date) {
-                  setSelectedDate(format(date, 'yyyy-MM-dd'));
-                }
-              }}
-            />
-          )}
         </View>
       </SafeAreaView>
 
@@ -2384,6 +2686,7 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#333',
     fontWeight: '600',
+    flexShrink: 1,
   },
   splitPreviewText: {
     fontSize: 13,

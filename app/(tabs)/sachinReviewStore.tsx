@@ -14,10 +14,13 @@ import {
   fetchPendingSachinRecord,
   fetchCategoryOptions,
   fetchPreviewData,
+  fetchBalanceReportRow,
   approveSachinRecord,
   rejectSachinRecord,
   SachinRecord,
   PreviewData,
+  fetchTotalAhdData,
+  TotalAhdData,
 } from '@/lib/sachinReviewStore';
 
 const BPCL_BLUE = '#017DC5';
@@ -51,7 +54,15 @@ export default function ReviewSachinScreen() {
   const [previewLoading, setPreviewLoading] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // ── Balance Report lookup (for BALANCE category) ─────────────────────
+  const [balanceReportRow, setBalanceReportRow] = useState<Record<string, any> | null>(null);
+  const [balanceReportLoading, setBalanceReportLoading] = useState(false);
+
   const [submitting, setSubmitting] = useState<'approve' | 'reject' | null>(null);
+
+  // ── Total AHD lookup (for TOTAL AHD category) ─────────────────────────
+  const [totalAhdData, setTotalAhdData] = useState<TotalAhdData | null>(null);
+  const [totalAhdLoading, setTotalAhdLoading] = useState(false);
 
   // ── Auto-calculate amount = rate × quantity ──────────────────────────
   // Called whenever rate or quantity changes. Updates amount state and
@@ -177,6 +188,152 @@ export default function ReviewSachinScreen() {
   };
 
   const isChanged = (current: string, orig: string) => current.trim() !== orig.trim();
+
+  // ── Commercial Payment match check: does the quantity match the number
+  // of matching entries found in the Commercial Records preview? ──────────
+  const isCommercialCategory = category.toUpperCase().replace(/[_\s]/g, '').includes('COMMERCIAL');
+  const qtyNum = parseInt(quantity, 10);
+  const amtNum = parseFloat(amount);
+
+  const commercialMatchStatus: 'match' | 'mismatch' | null =
+    isCommercialCategory && preview && !previewLoading && Number.isFinite(qtyNum) && qtyNum > 0
+      ? (preview.rows.length === qtyNum ? 'match' : 'mismatch')
+      : null;
+
+  // ── Closing Balance category: checked FIRST and excluded from the
+  // generic BALANCE match below, since "CLOSING BALANCE" also contains
+  // the substring "BALANCE" and would otherwise wrongly trigger the
+  // Balance Report lookup box. ───────────────────────────────────────────
+  const isClosingBalanceCategory = category.toUpperCase().trim() === 'CLOSING BALANCE';
+
+  // ── Balance category: does record.debit_balance_report_id point to a
+  // real row in the DebitBalanceReport table? There is only ever this
+  // one id column on the Sachin record — it applies regardless of
+  // whether the transaction itself is DEBIT or CREDIT. Explicitly
+  // excludes Closing Balance (see above). ────────────────────────────────
+  const isBalanceCategory =
+    category.toUpperCase().replace(/[_\s]/g, '').includes('BALANCE') && !isClosingBalanceCategory;
+
+  const isWeeklySalaryCategory = category.toUpperCase().trim() === 'WEEKLY SALARY';
+  // ── Closing Balance: reuse the Side Table Preview's own numbers
+  // instead of running a second, separate query. The preview already
+  // computes Total Debit / Total Credit / Closing Balance (Credit − Debit)
+  // for the correct previous business day, so pulling from there
+  // guarantees this always agrees with what's shown below — no drift,
+  // no separate date-math bugs. ──────────────────────────────────────────
+  // preview.rows is a list of [fieldName, fieldValue] pairs (e.g. ['Total Debit', '640051']),
+  // not one row with multiple columns — so we scan rows for the field name, not headers.
+  const closingBalanceRow = preview?.rows.find((row) =>
+    String(row[0]).toLowerCase().includes('closing balance')
+  );
+
+  const closingBalanceFromPreview: number | null =
+    isClosingBalanceCategory && closingBalanceRow
+      ? parseFloat(String(closingBalanceRow[1]).replace(/,/g, ''))
+      : null;
+
+  const closingBalanceMatchStatus: 'match' | 'mismatch' | null = isClosingBalanceCategory
+    ? previewLoading || closingBalanceFromPreview === null || !Number.isFinite(closingBalanceFromPreview)
+      ? null
+      : (Number.isFinite(amtNum) && Math.abs(closingBalanceFromPreview - amtNum) <= 10 ? 'match' : 'mismatch')
+    : null;
+
+  const isTotalAhdCategory = category.toUpperCase().trim() === 'TOTAL AHD';
+
+  const totalAhdMatchStatus: 'match' | 'mismatch' | null = isTotalAhdCategory
+    ? totalAhdLoading
+      ? null
+      : (totalAhdData && Number.isFinite(qtyNum) && totalAhdData.sumNumber === qtyNum ? 'match' : 'mismatch')
+    : null;
+
+  const balanceReportId = record ? (record as any).debit_balance_report_id : null;
+
+  const balanceMatchStatus: 'match' | 'mismatch' | null = isBalanceCategory
+    ? balanceReportLoading
+      ? null
+      : (balanceReportRow ? 'match' : 'mismatch')
+    : null;
+
+  const cylinderColIndex = preview?.headers.findIndex((h) => h.toLowerCase().includes('cylinder')) ?? -1;
+
+  const weeklySalaryFromPreview: number | null =
+    isWeeklySalaryCategory && preview && cylinderColIndex >= 0 && preview.rows[0]
+      ? parseFloat(String(preview.rows[0][cylinderColIndex]).replace(/,/g, ''))
+      : null;
+
+  const weeklySalaryMatchStatus: 'match' | 'mismatch' | null = isWeeklySalaryCategory
+    ? previewLoading || weeklySalaryFromPreview === null || !Number.isFinite(weeklySalaryFromPreview)
+      ? null
+      : (Number.isFinite(qtyNum) && weeklySalaryFromPreview === qtyNum ? 'match' : 'mismatch')
+    : null;
+
+  const amountStatus: 'match' | 'mismatch' | null =
+  commercialMatchStatus ?? balanceMatchStatus ?? totalAhdMatchStatus ?? closingBalanceMatchStatus ?? weeklySalaryMatchStatus;
+
+  // ── Fetch Total AHD delivery-record sums whenever the record or
+  // category changes into TOTAL AHD ──────────────────────────────────────
+  useEffect(() => {
+    let cancelled = false;
+
+    async function run() {
+      if (!record || !isTotalAhdCategory) {
+        if (!cancelled) {
+          setTotalAhdData(null);
+          setTotalAhdLoading(false);
+        }
+        return;
+      }
+      if (!cancelled) setTotalAhdLoading(true);
+      try {
+        const result = await fetchTotalAhdData(record.date);
+        if (!cancelled) setTotalAhdData(result);
+      } catch (err) {
+        console.error('fetchTotalAhdData failed:', err);
+        if (!cancelled) setTotalAhdData(null);
+      } finally {
+        if (!cancelled) setTotalAhdLoading(false);
+      }
+    }
+
+    run();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [record?.id, isTotalAhdCategory, record?.date]);
+
+  // ── Fetch the actual Balance Report row whenever the record or
+  // category changes into BALANCE ──────────────────────────────────────
+  useEffect(() => {
+    let cancelled = false;
+
+    async function run() {
+      if (!record || !isBalanceCategory || !balanceReportId) {
+        if (!cancelled) {
+          setBalanceReportRow(null);
+          setBalanceReportLoading(false);
+        }
+        return;
+      }
+      if (!cancelled) setBalanceReportLoading(true);
+      try {
+        const row = await fetchBalanceReportRow(balanceReportId);
+        if (!cancelled) setBalanceReportRow(row);
+      } catch {
+        if (!cancelled) setBalanceReportRow(null);
+      } finally {
+        if (!cancelled) setBalanceReportLoading(false);
+      }
+    }
+
+    run();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [record?.id, isBalanceCategory, balanceReportId]);
 
   // ── Approve / Reject ─────────────────────────────────────────────────
 
@@ -379,7 +536,15 @@ export default function ReviewSachinScreen() {
               </View>
 
               {/* Amount — read-only, auto-calculated */}
-              <View style={[styles.statBox, styles.amountBox, { marginTop: 10 }]}>
+              <View
+                style={[
+                  styles.statBox,
+                  styles.amountBox,
+                  { marginTop: 10 },
+                  amountStatus === 'match' && styles.amountBoxMatch,
+                  amountStatus === 'mismatch' && styles.amountBoxMismatch,
+                ]}
+              >
                 <View style={styles.amountLabelRow}>
                   <Text style={styles.statLabel}>Amount</Text>
                   <View style={styles.autoCalcBadge}>
@@ -392,11 +557,176 @@ export default function ReviewSachinScreen() {
                     styles.statInput,
                     styles.amountValue,
                     isChanged(amount, origAmount) && styles.amountValueChanged,
+                    amountStatus === 'match' && styles.amountValueMatch,
+                    amountStatus === 'mismatch' && styles.amountValueMismatch,
                   ]}
                 >
                   {amount || '—'}
                 </Text>
+
+                {isCommercialCategory && (
+                  <View style={styles.commercialCheckRow}>
+                    {previewLoading ? (
+                      <ActivityIndicator size="small" color="#8898aa" />
+                    ) : commercialMatchStatus === 'match' ? (
+                      <>
+                        <Ionicons name="checkmark-circle" size={13} color="#2dce89" />
+                        <Text style={[styles.commercialCheckText, styles.commercialCheckTextOk]}>
+                          {preview?.rows.length} of {quantity} commercial entries matched
+                        </Text>
+                      </>
+                    ) : commercialMatchStatus === 'mismatch' ? (
+                      <>
+                        <Ionicons name="close-circle" size={13} color="#f5365c" />
+                        <Text style={[styles.commercialCheckText, styles.commercialCheckTextBad]}>
+                          Only {preview?.rows.length ?? 0} of {quantity} commercial entries found
+                        </Text>
+                      </>
+                    ) : null}
+                  </View>
+                )}
+
+                {isWeeklySalaryCategory && (
+                <View style={styles.commercialCheckRow}>
+                  {previewLoading ? (
+                    <ActivityIndicator size="small" color="#8898aa" />
+                  ) : weeklySalaryMatchStatus === 'match' ? (
+                    <>
+                      <Ionicons name="checkmark-circle" size={13} color="#2dce89" />
+                      <Text style={[styles.commercialCheckText, styles.commercialCheckTextOk]}>
+                        Qty matches Week 1 cylinders ({weeklySalaryFromPreview})
+                      </Text>
+                    </>
+                  ) : weeklySalaryMatchStatus === 'mismatch' ? (
+                    <>
+                      <Ionicons name="close-circle" size={13} color="#f5365c" />
+                      <Text style={[styles.commercialCheckText, styles.commercialCheckTextBad]}>
+                        Qty {quantity} ≠ Week 1 cylinders ({weeklySalaryFromPreview ?? '—'})
+                      </Text>
+                    </>
+                  ) : null}
+                </View>
+              )}
+
+                {isClosingBalanceCategory && (
+                  <View style={styles.commercialCheckRow}>
+                    {previewLoading ? (
+                      <ActivityIndicator size="small" color="#8898aa" />
+                    ) : closingBalanceMatchStatus === 'match' ? (
+                      <>
+                        <Ionicons name="checkmark-circle" size={13} color="#2dce89" />
+                        <Text style={[styles.commercialCheckText, styles.commercialCheckTextOk]}>
+                          Prev. day net ₹{closingBalanceFromPreview} within ±10 of ₹{amount}
+                        </Text>
+                      </>
+                    ) : closingBalanceMatchStatus === 'mismatch' ? (
+                      <>
+                        <Ionicons name="close-circle" size={13} color="#f5365c" />
+                        <Text style={[styles.commercialCheckText, styles.commercialCheckTextBad]}>
+                          Prev. day net ₹{closingBalanceFromPreview ?? '—'} vs ₹{amount} — diff too large
+                        </Text>
+                      </>
+                    ) : null}
+                  </View>
+                )}
               </View>
+
+              {isTotalAhdCategory && (
+                <View
+                  style={[
+                    styles.balanceReportBox,
+                    !totalAhdLoading &&
+                      (totalAhdMatchStatus === 'match' ? styles.balanceReportBoxMatch : styles.balanceReportBoxMismatch),
+                  ]}
+                >
+                  <View style={styles.commercialCheckRow}>
+                    {totalAhdLoading ? (
+                      <>
+                        <ActivityIndicator size="small" color="#8898aa" />
+                        <Text style={styles.commercialCheckText}>Checking Delivery Records…</Text>
+                      </>
+                    ) : totalAhdMatchStatus === 'match' ? (
+                      <>
+                        <Ionicons name="checkmark-circle" size={13} color="#2dce89" />
+                        <Text style={[styles.commercialCheckText, styles.commercialCheckTextOk]}>
+                          Sum matches quantity ({totalAhdData?.sumNumber})
+                        </Text>
+                      </>
+                    ) : (
+                      <>
+                        <Ionicons name="close-circle" size={13} color="#f5365c" />
+                        <Text style={[styles.commercialCheckText, styles.commercialCheckTextBad]}>
+                          Sum of number ({totalAhdData?.sumNumber ?? 0}) ≠ quantity ({quantity})
+                        </Text>
+                      </>
+                    )}
+                  </View>
+
+                  {totalAhdData && (
+                    <View style={styles.balanceReportRowDetails}>
+                      <View style={styles.previewFieldRow}>
+                        <Text style={styles.previewFieldLabel}>Sum of number</Text>
+                        <Text style={styles.previewFieldValue}>{totalAhdData.sumNumber}</Text>
+                      </View>
+                      <View style={styles.previewFieldRow}>
+                        <Text style={styles.previewFieldLabel}>Sum of empty_received</Text>
+                        <Text style={styles.previewFieldValue}>{totalAhdData.sumEmptyReceived}</Text>
+                      </View>
+                    </View>
+                  )}
+                </View>
+              )}
+
+              {/* ── Balance Report lookup result — shown below Amount ── */}
+              {isBalanceCategory && (
+                <View
+                  style={[
+                    styles.balanceReportBox,
+                    !balanceReportLoading &&
+                      (balanceReportRow ? styles.balanceReportBoxMatch : styles.balanceReportBoxMismatch),
+                  ]}
+                >
+                  <View style={styles.commercialCheckRow}>
+                    {balanceReportLoading ? (
+                      <>
+                        <ActivityIndicator size="small" color="#8898aa" />
+                        <Text style={styles.commercialCheckText}>Checking Balance Report…</Text>
+                      </>
+                    ) : balanceReportRow ? (
+                      <>
+                        <Ionicons name="checkmark-circle" size={13} color="#2dce89" />
+                        <Text style={[styles.commercialCheckText, styles.commercialCheckTextOk]}>
+                          Found in Balance Report (#{balanceReportId})
+                        </Text>
+                      </>
+                    ) : (
+                      <>
+                        <Ionicons name="close-circle" size={13} color="#f5365c" />
+                        <Text style={[styles.commercialCheckText, styles.commercialCheckTextBad]}>
+                          {balanceReportId
+                            ? `No matching row in Balance Report for #${balanceReportId}`
+                            : 'No debit_balance_report_id on this record'}
+                        </Text>
+                      </>
+                    )}
+                  </View>
+
+                  {balanceReportRow && (
+                    <View style={styles.balanceReportRowDetails}>
+                      {Object.entries(balanceReportRow)
+                        .filter(([key]) => key !== 'idx')
+                        .map(([key, value]) => (
+                          <View key={key} style={styles.previewFieldRow}>
+                            <Text style={styles.previewFieldLabel}>{key}</Text>
+                            <Text style={styles.previewFieldValue} numberOfLines={2}>
+                              {value === null || value === undefined ? '—' : String(value)}
+                            </Text>
+                          </View>
+                        ))}
+                    </View>
+                  )}
+                </View>
+              )}
 
               {record.paytm_transaction && (
                 <View style={styles.paytmBadgeWrap}>
@@ -651,6 +981,66 @@ const styles = StyleSheet.create({
   },
   amountValueChanged: {
     color: '#fb6340',
+  },
+
+  // ── Commercial Payment / Balance category match indicator ──
+  amountBoxMatch: {
+    borderColor: '#2dce89',
+    borderWidth: 1.5,
+    backgroundColor: '#f0fdf6',
+  },
+  amountBoxMismatch: {
+    borderColor: '#f5365c',
+    borderWidth: 1.5,
+    backgroundColor: '#fff5f6',
+  },
+  amountValueMatch: {
+    color: '#2dce89',
+  },
+  amountValueMismatch: {
+    color: '#f5365c',
+  },
+  commercialCheckRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    marginTop: 8,
+  },
+  commercialCheckText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#8898aa',
+  },
+  commercialCheckTextOk: {
+    color: '#2dce89',
+  },
+  commercialCheckTextBad: {
+    color: '#f5365c',
+  },
+
+  // ── Balance Report lookup result box ──
+  balanceReportBox: {
+    marginTop: 10,
+    borderRadius: 8,
+    borderWidth: 1.5,
+    borderColor: '#e9ecef',
+    backgroundColor: '#f8f9fe',
+    padding: 10,
+  },
+  balanceReportBoxMatch: {
+    borderColor: '#2dce89',
+    backgroundColor: '#f0fdf6',
+  },
+  balanceReportBoxMismatch: {
+    borderColor: '#f5365c',
+    backgroundColor: '#fff5f6',
+  },
+  balanceReportRowDetails: {
+    marginTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(0,0,0,0.06)',
+    paddingTop: 8,
+    gap: 2,
   },
 
   paytmBadgeWrap: { alignItems: 'center', marginTop: 14 },

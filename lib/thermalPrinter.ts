@@ -71,10 +71,12 @@ export async function connectToSavedPrinter(): Promise<boolean> {
   const saved = await getSavedPrinter();
   if (!saved) return false;
   try {
+    const granted = await requestBluetoothPermissions();
+    if (!granted) return false; // no permission — caller can prompt user to reconnect manually
     await BluetoothManager.connect(saved.address);
     return true;
   } catch {
-    return false; // printer off / out of range — caller should prompt to reconnect
+    return false; // printer off / out of range / permission denied
   }
 }
 

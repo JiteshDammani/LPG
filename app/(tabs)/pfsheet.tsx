@@ -151,10 +151,10 @@ const MONTH_NAMES_SHORT = [
 ];
 
 const EXCLUDED_NAMES = [
-  'RAHUL','SAILESH','NARAYAN','NAMDEV - 19 KG','BANTE','HARI','VITTHAL',
+  'RAHUL','SAILESH','NARAYAN','NAMDEV - 19 KG','BANTE','HARI','VITTHAL','PRANAY','MANISH','RAUT RAJ',
 ];
 const TOTAL_EXCL_NAMES = [
-  'RAHUL','SAILESH','NARAYAN','SUNDAY','AGD',
+  'RAHUL','SAILESH','NARAYAN','SUNDAY','AGD','PRANAY','MANISH','RAUT RAJ',
   'RAMESH','NAMDEV - 19 KG','BANTE','HARI','VITTHAL',
 ];
 
@@ -401,38 +401,44 @@ export default function PFSheetScreen() {
     };
 
     const [
-      totalSaleAll, rahulTotal, saileshTotal, banteTotal,
-      hariTotal, vitthalTotal, dbaTotal, agdRameshTotal,
-    ] = await Promise.all([
-      supabase.from('dashboard_deliveryrecords').select('number')
-        .gte('date', rangeStart).lte('date', rangeEnd).neq('name', 'SUNDAY').limit(100000)
-        .then(({ data }) => (data || []).reduce((s: number, r: any) => s + Number(r.number || 0), 0)),
-      fetchNameTotal('RAHUL'), fetchNameTotal('SAILESH'), fetchNameTotal('BANTE'),
-      fetchNameTotal('HARI'),  fetchNameTotal('VITTHAL'), fetchNameTotal('DBA', true),
-      supabase.from('dashboard_deliveryrecords').select('number')
-        .gte('date', rangeStart).lte('date', rangeEnd).in('name', ['AGD', 'RAMESH']).limit(10000)
-        .then(({ data }) => (data || []).reduce((s: number, r: any) => s + Number(r.number || 0), 0)),
-    ]);
+  totalSaleAll, rahulTotal, saileshTotal, banteTotal,
+  hariTotal, vitthalTotal, dbaTotal, agdRameshTotal,
+  pranayTotal, manishTotal, rautRajTotal,          // ← NEW
+] = await Promise.all([
+  supabase.from('dashboard_deliveryrecords').select('number')
+    .gte('date', rangeStart).lte('date', rangeEnd).neq('name', 'SUNDAY').limit(100000)
+    .then(({ data }) => (data || []).reduce((s: number, r: any) => s + Number(r.number || 0), 0)),
+  fetchNameTotal('RAHUL'), fetchNameTotal('SAILESH'), fetchNameTotal('BANTE'),
+  fetchNameTotal('HARI'),  fetchNameTotal('VITTHAL'), fetchNameTotal('DBA', true),
+  supabase.from('dashboard_deliveryrecords').select('number')
+    .gte('date', rangeStart).lte('date', rangeEnd).in('name', ['AGD', 'RAMESH']).limit(10000)
+    .then(({ data }) => (data || []).reduce((s: number, r: any) => s + Number(r.number || 0), 0)),
+  fetchNameTotal('PRANAY'), fetchNameTotal('MANISH'), fetchNameTotal('RAUT RAJ'),   // ← NEW
+]);
 
-    const verificationTotal =
-      totalCount + rahulTotal + saileshTotal + banteTotal +
-      hariTotal + vitthalTotal + dbaTotal + agdRameshTotal;
+const verificationTotal =
+  totalCount + rahulTotal + saileshTotal + banteTotal +
+  hariTotal + vitthalTotal + dbaTotal + agdRameshTotal +
+  pranayTotal + manishTotal + rautRajTotal;         // ← NEW
 
     const monthLabel = `${MONTH_NAMES[selectedMonth]} ${selectedYear}`;
 
     const bottomSecs: BottomSection[] = [
-      { label: `TOTAL SALE — ${format(new Date(rangeStart), 'dd-MM-yyyy')} TO ${format(new Date(rangeEnd), 'dd-MM-yyyy')}`,
-        value: totalSaleAll, isBold: true },
-      { label: 'TOTAL 14.2 PF SHEET',        value: totalCount },
-      { label: 'PRAMOD (RAHUL)',              value: rahulTotal },
-      { label: 'SAILESH',                     value: saileshTotal },
-      { label: 'BANTE',                       value: banteTotal },
-      { label: 'HARI',                        value: hariTotal },
-      { label: 'VITTHAL',                     value: vitthalTotal },
-      { label: 'DBA',                         value: dbaTotal },
-      { label: 'CASH N CARRY (AGD + RAMESH)', value: agdRameshTotal },
-      { label: 'GRAND TOTAL (VERIFICATION)',  value: verificationTotal, isBold: true },
-    ];
+  { label: `TOTAL SALE — ${format(new Date(rangeStart), 'dd-MM-yyyy')} TO ${format(new Date(rangeEnd), 'dd-MM-yyyy')}`,
+    value: totalSaleAll, isBold: true },
+  { label: 'TOTAL 14.2 PF SHEET',        value: totalCount },
+  { label: 'PRAMOD (RAHUL)',              value: rahulTotal },
+  { label: 'SAILESH',                     value: saileshTotal },
+  { label: 'BANTE',                       value: banteTotal },
+  { label: 'HARI',                        value: hariTotal },
+  { label: 'VITTHAL',                     value: vitthalTotal },
+  { label: 'PRANAY',                      value: pranayTotal },     // ← NEW
+  { label: 'MANISH',                      value: manishTotal },     // ← NEW
+  { label: 'RAUT RAJ',                    value: rautRajTotal },    // ← NEW
+  { label: 'DBA',                         value: dbaTotal },
+  { label: 'CASH N CARRY (AGD + RAMESH)', value: agdRameshTotal },
+  { label: 'GRAND TOTAL (VERIFICATION)',  value: verificationTotal, isBold: true },
+];
 
     // PF sheet rows
     const officeStaff   = pfRows.filter((r: any) => r.designation === 'OFFICE STAFF');
